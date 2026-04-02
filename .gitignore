@@ -1,0 +1,11 @@
+# Node 모듈 무시
+node_modules/
+
+# 로그 파일 무시
+npm-debug.log*
+
+# 환경 변수 (비밀번호 등) 무시
+.env
+
+# (선택) 맥북 사용자라면 찌꺼기 파일 무시
+.DS_Store

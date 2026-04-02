@@ -1,0 +1,24 @@
+{
+  "name": "looktalkai",
+  "version": "1.0.0",
+  "description": "",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jwy021/LookTalkAI.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/jwy021/LookTalkAI/issues"
+  },
+  "homepage": "https://github.com/jwy021/LookTalkAI#readme",
+  "devDependencies": {
+    "electron": "^41.1.1"
+  }
+}
