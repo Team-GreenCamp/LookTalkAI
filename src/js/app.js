@@ -1,11 +1,9 @@
-// 구글 MediaPipe 라이브러리 불러오기
 import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3";
 
 const statusText = document.getElementById('status-text');
 const video = document.getElementById('webcam');
 let faceLandmarker;
 
-// 1. AI 모델 세팅하기
 async function initializeFaceLandmarker() {
   const filesetResolver = await FilesetResolver.forVisionTasks(
     "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm"
@@ -15,27 +13,19 @@ async function initializeFaceLandmarker() {
       modelAssetPath: `https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task`,
       delegate: "GPU"
     },
-    outputFaceBlendshapes: false,
     runningMode: "VIDEO",
-    numFaces: 1 // 한 명의 얼굴만 추적
+    numFaces: 1
   });
-  
-  startCamera(); // 세팅 끝나면 카메라 켜기
+  startCamera();
 }
 
-// 2. 웹캠 켜기
 function startCamera() {
   navigator.mediaDevices.getUserMedia({ video: true }).then((stream) => {
     video.srcObject = stream;
     video.addEventListener("loadeddata", predictWebcam);
-    statusText.innerText = "카메라 연동 완료!";
-  }).catch((err) => {
-    statusText.innerText = "카메라 권한 에러!";
-    console.error(err);
-  });
+  }).catch((err) => console.error("카메라 에러:", err));
 }
 
-// 3. 매 프레임마다 고개 방향 확인하기
 let lastVideoTime = -1;
 function predictWebcam() {
   let startTimeMs = performance.now();
@@ -43,45 +33,74 @@ function predictWebcam() {
     lastVideoTime = video.currentTime;
     const results = faceLandmarker.detectForVideo(video, startTimeMs);
 
-    // 얼굴이 화면에 보인다면
-    if (results.faceLandmarks.length > 0) {
+    if (results.faceLandmarks && results.faceLandmarks.length > 0) {
       const landmarks = results.faceLandmarks[0];
       
-      // 코끝(1), 왼쪽 뺨(234), 오른쪽 뺨(454) 좌표 추출
-        const nose = landmarks[1].x;
-        const leftCheek = landmarks[234].x;
-        const rightCheek = landmarks[454].x;
-        
-        const ratio = (nose - leftCheek) / (rightCheek - nose); // 고개 방향 비율 계산
+      // 1. 얼굴 방향 계산을 위한 포인트 추출
+      // --- 좌우(Yaw) 계산용 포인트 ---
+      const nose = landmarks[1];      // 코끝
+      const leftCheek = landmarks[234]; // 왼쪽 끝
+      const rightCheek = landmarks[454]; // 오른쪽 끝
+      const yawRatio = (nose.x - leftCheek.x) / (rightCheek.x - nose.x);
 
-      // 1. 위젯이 모니터의 왼쪽 절반에 있는지 오른쪽 절반에 있는지 파악 (화면 가로 길이의 절반 기준)
-      const isWidgetOnLeft = window.screenX < (window.screen.width / 2);
+      // --- 상하(Pitch) 계산용 포인트 ---
+      const forehead = landmarks[10]; // 이마 위쪽
+      const chin = landmarks[152];    // 턱 끝
+      const pitchRatio = (nose.y - forehead.y) / (chin.y - nose.y);
 
-      // 2. 사용자의 시선 방향 (반대였던 방향을 수정했습니다)
-      const isLookingLeft = ratio > 1.2;
-      const isLookingRight = ratio < 0.8;
+      // 2. 위젯의 화면 위치 파악 (X, Y 비율)
+      const screenW = window.screen.width;
+      const screenH = window.screen.height;
+      const widgetX = window.screenX + 75; // 위젯 중심
+      const widgetY = window.screenY + 75;
 
-      // 3. 위젯 위치와 내 시선이 일치하는지 확인!
-      let isLookingAtWidget = false;
-      if (isWidgetOnLeft && isLookingLeft) {
-        isLookingAtWidget = true; // 위젯이 왼쪽에 있고, 나도 왼쪽을 봄
-      } else if (!isWidgetOnLeft && isLookingRight) {
-        isLookingAtWidget = true; // 위젯이 오른쪽에 있고, 나도 오른쪽을 봄
-      }
+      const posX = widgetX / screenW; // 0~1 (좌~우)
+      const posY = widgetY / screenH; // 0~1 (상~하)
 
-      // 4. 결과 출력
-      if (isLookingAtWidget) {
-        statusText.innerText = "🎙️ 듣는 중...";
-        statusText.style.color = "#4ade80"; // 초록색으로 변경 (여기서 음성인식 시작!)
-      } else {
-        statusText.innerText = "딴 곳 보는 중";
-        statusText.style.color = "gray"; // 시선을 떼면 대기 상태 (여기서 음성인식 종료!)
-      }
+      // 3. 시선 판별 로직
+      let matchX = false;
+      let matchY = false;
+
+      // 좌우 매칭
+      if (posX < 0.35 && yawRatio > 1.4) matchX = true;       // 왼쪽 위젯 & 왼쪽 봄
+      else if (posX > 0.65 && yawRatio < 0.7) matchX = true;  // 오른쪽 위젯 & 오른쪽 봄
+      else if (posX >= 0.35 && posX <= 0.65 && yawRatio >= 0.7 && yawRatio <= 1.4) matchX = true; // 중앙
+
+      // 상하 매칭 (비율 숫자는 카메라 각도에 따라 0.8~1.2 사이에서 튜닝)
+      if (posY < 0.3 && pitchRatio < 0.9) matchY = true;      // 상단 위젯 & 고개 듦
+      else if (posY > 0.7 && pitchRatio > 1.08) matchY = true; // 하단 위젯 & 고개 숙임
+      else if (posY >= 0.3 && posY <= 0.7 && pitchRatio >= 0.9 && pitchRatio <= 1.1) matchY = true; // 중앙
+
+
+      // 5. 상태 업데이트
+      updateStatus(matchX && matchY);
+    } else {
+      updateStatus(false, "얼굴 없음");
     }
   }
-  // 계속 반복
   window.requestAnimationFrame(predictWebcam);
 }
 
-// 프로그램 시작!
+function updateStatus(isActive, msg) {
+  if (msg === "얼굴 없음") {
+    statusText.innerText = "얼굴을 보여주세요";
+    statusText.style.color = "gray";
+    return;
+  }
+
+  if (isActive) {
+    if (statusText.innerText !== "🎙️ 듣는 중...") {
+      statusText.innerText = "🎙️ 듣는 중...";
+      statusText.style.color = "#4ade80";
+      // TODO: startSTT(); 
+    }
+  } else {
+    if (statusText.innerText !== "딴 곳 보는 중") {
+      statusText.innerText = "딴 곳 보는 중";
+      statusText.style.color = "gray";
+      // TODO: stopSTT();
+    }
+  }
+}
+
 initializeFaceLandmarker();
