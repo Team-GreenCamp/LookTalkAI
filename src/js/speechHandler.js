@@ -1,227 +1,55 @@
-const { ipcRenderer } = require('electron');
-
 export class SpeechHandler {
-    constructor(onResultCallback, onStateChangeCallback = null) {
-        this.onResultCallback = onResultCallback;
-        this.onStateChangeCallback = onStateChangeCallback;
-        this.mediaStream = null;
+    constructor(onSpeechComplete, onStateChange) {
+        this.onSpeechComplete = onSpeechComplete; // 최종 오디오 데이터를 넘겨줄 콜백
+        this.onStateChange = onStateChange;
         this.mediaRecorder = null;
-        this.audioContext = null;
-        this.audioSource = null;
-        this.analyser = null;
         this.audioChunks = [];
         this.isRecording = false;
-        this.isStarting = false;
-        this.hasDetectedSpeech = false;
-        this.lastSpeechAt = 0;
-        this.monitorFrameId = null;
-        this.maxRecordingTimerId = null;
-        this.mimeType = this.getSupportedMimeType();
     }
 
+    // MIME 타입 확인 (Gemini는 webm/opus 지원)
     getSupportedMimeType() {
-        const preferredMimeTypes = [
-            'audio/webm;codecs=opus',
-            'audio/webm',
-            'audio/ogg;codecs=opus'
-        ];
-
-        return preferredMimeTypes.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || '';
-    }
-
-    async ensureMediaStream() {
-        if (this.mediaStream) {
-            return this.mediaStream;
-        }
-
-        // 한글 음성 입력을 위해 마이크 스트림을 한 번만 열고 재사용
-        this.mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-                channelCount: 1,
-                echoCancellation: true,
-                noiseSuppression: true
-            }
-        });
-
-        return this.mediaStream;
-    }
-
-    async setupAudioMonitor(stream) {
-        this.audioContext = new AudioContext();
-        this.audioSource = this.audioContext.createMediaStreamSource(stream);
-        this.analyser = this.audioContext.createAnalyser();
-        this.analyser.fftSize = 2048;
-        this.audioSource.connect(this.analyser);
-        this.hasDetectedSpeech = false;
-        this.lastSpeechAt = performance.now();
-
-        const buffer = new Uint8Array(this.analyser.fftSize);
-        const silenceThreshold = 0.035;
-        const silenceDurationMs = 1200;
-
-        const monitorAudioLevel = () => {
-            if (!this.isRecording || !this.analyser) {
-                return;
-            }
-
-            this.analyser.getByteTimeDomainData(buffer);
-
-            let sum = 0;
-
-            for (const sample of buffer) {
-                const normalized = (sample - 128) / 128;
-                sum += normalized * normalized;
-            }
-
-            const rms = Math.sqrt(sum / buffer.length);
-            const now = performance.now();
-
-            if (rms > silenceThreshold) {
-                this.hasDetectedSpeech = true;
-                this.lastSpeechAt = now;
-            }
-
-            // 말이 시작된 뒤 일정 시간 무음이면 자동 종료
-            if (this.hasDetectedSpeech && now - this.lastSpeechAt > silenceDurationMs) {
-                this.stop();
-                return;
-            }
-
-            this.monitorFrameId = requestAnimationFrame(monitorAudioLevel);
-        };
-
-        this.monitorFrameId = requestAnimationFrame(monitorAudioLevel);
-    }
-
-    async cleanupAudioMonitor() {
-        if (this.monitorFrameId) {
-            cancelAnimationFrame(this.monitorFrameId);
-            this.monitorFrameId = null;
-        }
-
-        if (this.maxRecordingTimerId) {
-            clearTimeout(this.maxRecordingTimerId);
-            this.maxRecordingTimerId = null;
-        }
-
-        if (this.audioSource) {
-            this.audioSource.disconnect();
-            this.audioSource = null;
-        }
-
-        if (this.audioContext) {
-            await this.audioContext.close();
-            this.audioContext = null;
-        }
-
-        this.analyser = null;
-    }
-
-    async handleRecordingStop() {
-        this.isRecording = false;
-        this.onStateChangeCallback?.(false);
-
-        const audioBlob = new Blob(this.audioChunks, {
-            type: this.mimeType || 'audio/webm'
-        });
-        this.audioChunks = [];
-
-        if (!audioBlob.size) {
-            await this.cleanupAudioMonitor();
-            return;
-        }
-
-        const arrayBuffer = await audioBlob.arrayBuffer();
-        const audioBase64 = btoa(
-            new Uint8Array(arrayBuffer).reduce(
-                (binary, byte) => binary + String.fromCharCode(byte),
-                ''
-            )
-        );
-
-        console.log('[SpeechHandler] audio captured', {
-            size: audioBlob.size,
-            mimeType: audioBlob.type || this.mimeType || 'audio/webm'
-        });
-
-        const response = await ipcRenderer.invoke('transcribe-audio', {
-            audioBase64,
-            mimeType: audioBlob.type || this.mimeType || 'audio/webm'
-        });
-
-        await this.cleanupAudioMonitor();
-
-        if (!response?.ok) {
-            console.error('[SpeechHandler] transcription failed', response?.error || response);
-            return;
-        }
-
-        console.log('[SpeechHandler] transcription success', response.transcript);
-        this.onResultCallback(response.transcript, true);
+        return 'audio/webm;codecs=opus';
     }
 
     async start() {
-        if (this.isRecording || this.isStarting) {
-            return false;
-        }
-
-        this.isStarting = true;
-        console.log('[SpeechHandler] recording start requested');
+        if (this.isRecording) return;
 
         try {
-            const stream = await this.ensureMediaStream();
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
             this.audioChunks = [];
-            this.mediaRecorder = new MediaRecorder(
-                stream,
-                this.mimeType ? { mimeType: this.mimeType } : undefined
-            );
+            this.mediaRecorder = new MediaRecorder(stream, { mimeType: this.getSupportedMimeType() });
 
-            this.mediaRecorder.ondataavailable = (event) => {
-                if (event.data && event.data.size > 0) {
-                    this.audioChunks.push(event.data);
-                }
+            this.mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) this.audioChunks.push(e.data);
             };
 
             this.mediaRecorder.onstop = async () => {
-                console.log('[SpeechHandler] recording stop');
-                await this.handleRecordingStop();
+                const audioBlob = new Blob(this.audioChunks, { type: this.getSupportedMimeType() });
+                const reader = new FileReader();
+                reader.readAsDataURL(audioBlob);
+                reader.onloadend = () => {
+                    const base64Data = reader.result.split(',')[1];
+                    this.onSpeechComplete(base64Data, this.getSupportedMimeType());
+                };
+                this.onStateChange(false);
             };
 
-            this.mediaRecorder.onerror = async (event) => {
-                console.error('[SpeechHandler] recorder error', event?.error || event);
-                await this.cleanupAudioMonitor();
-                this.isRecording = false;
-                this.onStateChangeCallback?.(false);
-            };
-
-            await this.setupAudioMonitor(stream);
-
-            // 너무 길게 녹음되는 경우를 막기 위한 최대 길이 제한
-            this.maxRecordingTimerId = setTimeout(() => {
-                this.stop();
-            }, 6000);
-
-            this.mediaRecorder.start(250);
-            this.isStarting = false;
+            this.mediaRecorder.start();
             this.isRecording = true;
-            console.log('[SpeechHandler] recording start');
-            this.onStateChangeCallback?.(true);
-            return true;
-        } catch (error) {
-            this.isStarting = false;
-            console.error('[SpeechHandler] recording start failed', error);
-            await this.cleanupAudioMonitor();
-            return false;
+            this.onStateChange(true); // 여기서 초록색 테두리 트리거 발생
+
+            // 5초 후 자동 종료 (필요시 조정)
+            setTimeout(() => this.stop(), 5000);
+        } catch (err) {
+            console.error('마이크 시작 실패:', err);
         }
     }
 
     stop() {
-        if (!this.mediaRecorder || this.mediaRecorder.state === 'inactive') {
-            return false;
+        if (this.mediaRecorder && this.mediaRecorder.state !== 'inactive') {
+            this.mediaRecorder.stop();
+            this.isRecording = false;
         }
-
-        console.log('[SpeechHandler] recording stop requested');
-        this.mediaRecorder.stop();
-        return true;
     }
 }
