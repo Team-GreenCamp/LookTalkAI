@@ -1,10 +1,11 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, screen } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
 let win; // 창 객체를 전역 변수로 선언
+let cursorPollTimerId = null;
 let googleAccessTokenCache = null;
 let googleAccessTokenExpiresAt = 0;
 let googleQuotaProjectId = null;
@@ -296,8 +297,8 @@ function createWindow() {
 
   // 3. 창 생성 (저장된 x, y 좌표가 있으면 적용하고, 없으면 기본값으로 화면 가운데 띄움)
   win = new BrowserWindow({
-    width: 240,
-    height: 300,
+    width: 220,
+    height: 350,
     x: savedBounds.x,  // ⭐️ 불러온 X 좌표
     y: savedBounds.y,  // ⭐️ 불러온 Y 좌표
     transparent: true,
@@ -327,7 +328,30 @@ function createWindow() {
   };
 
   win.on('moved', saveWindowPosition);
-  win.on('close', saveWindowPosition);
+  win.on('close', () => {
+    saveWindowPosition();
+    if (cursorPollTimerId) {
+      clearInterval(cursorPollTimerId);
+      cursorPollTimerId = null;
+    }
+  });
+
+  // 5. 전역 커서 위치를 30fps로 폴링해서 렌더러에 전달 (투명 창 밖에서도 눈 추적 가능)
+  cursorPollTimerId = setInterval(() => {
+    if (win.isDestroyed()) {
+      clearInterval(cursorPollTimerId);
+      return;
+    }
+
+    const cursor = screen.getCursorScreenPoint();
+    const bounds = win.getBounds();
+
+    // 스크린 좌표를 창 로컬 좌표로 변환
+    win.webContents.send('cursor-position', {
+      x: cursor.x - bounds.x,
+      y: cursor.y - bounds.y
+    });
+  }, 33); // ~30fps
 }
 
 ipcMain.handle('generate-ai-response', async (_event, userText) => {
