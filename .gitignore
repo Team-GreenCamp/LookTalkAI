@@ -6,8 +6,9 @@ npm-debug.log*
 
 # 환경 변수 (비밀번호 등) 무시
 .env
+!.env.example
+google-service-account.json
 
 # (선택) 맥북 사용자라면 찌꺼기 파일 무시
 .DS_Store
 test
-.env.example

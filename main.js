@@ -1,8 +1,13 @@
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 
 let win; // 창 객체를 전역 변수로 선언
+let googleAccessTokenCache = null;
+let googleAccessTokenExpiresAt = 0;
+let googleQuotaProjectId = null;
 
 function loadEnvFile() {
   const envPath = path.join(__dirname, '.env');
@@ -48,6 +53,158 @@ function loadEnvFile() {
 loadEnvFile();
 
 const geminiModel = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview';
+const googleSpeechLanguageCode = process.env.GOOGLE_SPEECH_LANGUAGE_CODE || 'ko-KR';
+
+function toBase64Url(value) {
+  return Buffer.from(value)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function getGoogleApplicationDefaultCredentials() {
+  const adcPathFromEnv = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+  const defaultAdcPath = path.join(
+    os.homedir(),
+    '.config',
+    'gcloud',
+    'application_default_credentials.json'
+  );
+  const credentialsPath = adcPathFromEnv || defaultAdcPath;
+
+  if (!fs.existsSync(credentialsPath)) {
+    throw new Error(
+      'Application Default Credentials 파일을 찾지 못했습니다. `gcloud auth application-default login`을 먼저 실행하세요.'
+    );
+  }
+
+  const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
+  googleQuotaProjectId = credentials.quota_project_id || process.env.GOOGLE_CLOUD_QUOTA_PROJECT || null;
+  return credentials;
+}
+
+async function getGoogleAccessToken() {
+  const now = Date.now();
+
+  if (googleAccessTokenCache && now < googleAccessTokenExpiresAt) {
+    return googleAccessTokenCache;
+  }
+
+  const credentials = getGoogleApplicationDefaultCredentials();
+  let tokenResponse;
+
+  if (credentials.type === 'authorized_user') {
+    tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({
+        client_id: credentials.client_id,
+        client_secret: credentials.client_secret,
+        refresh_token: credentials.refresh_token,
+        grant_type: 'refresh_token'
+      })
+    });
+  } else if (credentials.type === 'service_account') {
+    const issuedAt = Math.floor(now / 1000);
+    const expiresAt = issuedAt + 3600;
+    const header = toBase64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+    const claimSet = toBase64Url(JSON.stringify({
+      iss: credentials.client_email,
+      scope: 'https://www.googleapis.com/auth/cloud-platform',
+      aud: 'https://oauth2.googleapis.com/token',
+      exp: expiresAt,
+      iat: issuedAt
+    }));
+    const unsignedToken = `${header}.${claimSet}`;
+    const signature = crypto
+      .createSign('RSA-SHA256')
+      .update(unsignedToken)
+      .sign(credentials.private_key, 'base64')
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/g, '');
+
+    tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+        assertion: `${unsignedToken}.${signature}`
+      })
+    });
+  } else {
+    throw new Error(`지원하지 않는 ADC 자격 증명 타입입니다: ${credentials.type}`);
+  }
+
+  if (!tokenResponse.ok) {
+    const errorText = await tokenResponse.text();
+    throw new Error(`Google OAuth 토큰 발급 실패 (${tokenResponse.status}): ${errorText}`);
+  }
+
+  const tokenData = await tokenResponse.json();
+  googleAccessTokenCache = tokenData.access_token;
+  googleAccessTokenExpiresAt = now + Math.max((tokenData.expires_in - 60) * 1000, 0);
+
+  return googleAccessTokenCache;
+}
+
+function extractTranscript(data) {
+  const results = Array.isArray(data?.results) ? data.results : [];
+
+  return results
+    .map((result) => result?.alternatives?.[0]?.transcript || '')
+    .join(' ')
+    .trim();
+}
+
+async function transcribeAudioWithGoogle({ audioBase64, mimeType }) {
+  if (!audioBase64) {
+    throw new Error('전사할 오디오 데이터가 없습니다.');
+  }
+
+  const accessToken = await getGoogleAccessToken();
+  const response = await fetch('https://speech.googleapis.com/v1/speech:recognize', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+      ...(googleQuotaProjectId ? { 'x-goog-user-project': googleQuotaProjectId } : {})
+    },
+    body: JSON.stringify({
+      config: {
+        encoding: mimeType?.includes('webm') ? 'WEBM_OPUS' : 'LINEAR16',
+        sampleRateHertz: 48000,
+        languageCode: googleSpeechLanguageCode,
+        enableAutomaticPunctuation: true,
+        model: 'latest_short'
+      },
+      audio: {
+        content: audioBase64
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Google STT 호출 실패 (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json();
+  const transcript = extractTranscript(data);
+
+  if (!transcript) {
+    throw new Error('Google STT 응답에서 전사 텍스트를 찾지 못했습니다.');
+  }
+
+  console.log('[STT][OUTPUT]', transcript);
+
+  return transcript;
+}
 
 function extractResponseText(data) {
   const parts = data?.candidates?.[0]?.content?.parts;
@@ -187,6 +344,16 @@ ipcMain.handle('generate-ai-response', async (_event, userText) => {
   } catch (error) {
     console.error('❌ AI 응답 생성 실패:', error);
     return { ok: false, error: error.message || 'AI 응답 생성에 실패했습니다.' };
+  }
+});
+
+ipcMain.handle('transcribe-audio', async (_event, payload) => {
+  try {
+    const transcript = await transcribeAudioWithGoogle(payload || {});
+    return { ok: true, transcript };
+  } catch (error) {
+    console.error('❌ Google STT 전사 실패:', error);
+    return { ok: false, error: error.message || 'Google STT 전사에 실패했습니다.' };
   }
 });
 

@@ -102,8 +102,6 @@ const speech = new SpeechHandler(
       return;
     }
 
-    // 한 번 트리거에 한 번만 응답하도록 최종 인식 직후 녹음을 종료
-    speech.stop();
     await requestAiResponse(trimmedText);
   },
   (isRecording) => {
