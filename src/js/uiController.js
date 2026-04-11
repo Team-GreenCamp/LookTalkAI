@@ -7,6 +7,23 @@ export class UIController {
         this.antennaBall = document.getElementById('antenna-ball');
         this.typingTimerId = null;
         this.bubbleTimerId = null;
+        this.stateTimerId = null; // 상태 복구용 타이머
+
+        this.initBlinking(); // 눈 깜빡임 로직 초기화
+    }
+
+
+    // 평상시(idle) 눈 깜빡임
+    initBlinking() {
+        setInterval(() => {
+            if (this.widget.getAttribute('data-state') === 'idle') {
+                const eyes = document.querySelectorAll('.eye');
+                eyes.forEach(eye => eye.classList.add('blink'));
+                setTimeout(() => {
+                    eyes.forEach(eye => eye.classList.remove('blink'));
+                }, 200);
+            }
+        }, 4000); // 4초마다 깜빡임
     }
 
     setRobotState(state) {
@@ -14,7 +31,20 @@ export class UIController {
         this.robotFace.classList.remove('bounce');
         void this.robotFace.offsetWidth;
         this.robotFace.classList.add('bounce');
+
+        // happy(하트 눈) 상태인 경우 3초 뒤에 idle로 복귀
+        if (this.stateTimerId) clearTimeout(this.stateTimerId);
+        if (state === 'happy') {
+            this.stateTimerId = setTimeout(() => {
+                if (this.widget.getAttribute('data-state') === 'happy') {
+                    this.setRobotState('idle');
+                }
+            }, 3000);
+        }
     }
+
+
+
 
     setReadiness(isReady) {
         this.widget.setAttribute('data-ready', isReady ? 'ready' : 'not-ready');

@@ -93,6 +93,16 @@ function createWindow() {
     win.setPosition(x - mouseX, y - mouseY);
   });
 
+  ipcMain.on('resize-window', (event, { width, height }) => {
+    if (win && !win.isDestroyed()) {
+      win.setSize(width, height, false);
+    }
+  });
+
+  // 앱 종료 요청 수신
+  ipcMain.on('close-app', () => {
+    app.quit();
+  });
 
   // 윈도우 위치 저장 (듀얼 모니터 대응)
   const saveWindowPosition = () => {

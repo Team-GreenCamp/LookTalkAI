@@ -31,11 +31,18 @@ export class ThemeManager {
     applyPalette(paletteName) {
         const theme = paletteThemes[paletteName] || paletteThemes.mint;
         const root = document.documentElement;
+
+        // 캐릭터 색상
         root.style.setProperty('--robot-body', theme.body);
         root.style.setProperty('--robot-face', theme.face);
         root.style.setProperty('--accent', theme.accent);
         root.style.setProperty('--accent-glow', theme.accentGlow);
         root.style.setProperty('--cheek', theme.cheek);
+
+        // 패널 및 버튼 색상 연동 (테마별 강조색 적용)
+        root.style.setProperty('--panel-bg', `${theme.face}f2`);
+        root.style.setProperty('--button-bg', theme.accent);
+
         localStorage.setItem('looktalk.palette', paletteName);
         return paletteName;
     }

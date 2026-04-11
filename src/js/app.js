@@ -9,19 +9,86 @@ const ui = new UIController();
 const theme = new ThemeManager();
 const history = new HistoryManager();
 const video = document.getElementById('webcam');
+const statusText = document.getElementById('status-text');
+const robotFace = document.getElementById('robot-face');
+const settingsPanel = document.getElementById('settings-panel');
+const historyDrawer = document.getElementById('history-drawer');
+const toggleHistoryButton = document.getElementById('toggle-history-button');
+const widget = document.getElementById('widget');
 
 let isAborted = false;
 let isGeneratingResponse = false;
+let isAppReady = false;
 let appSettings = theme.loadSettings();
 
-// ── 입력 모드 통합 관리 ──
+// ── 드래그 이동 및 설정 패널 클릭 감지 ──
+let isDragging = false;
+let dragStartX, dragStartY;
+let hasMoved = false;
+
+document.querySelectorAll('.drag-handle').forEach(handle => {
+  handle.addEventListener('mousedown', (e) => {
+    // 버튼이나 입력창 클릭 시에는 드래그 무시
+    if (e.target.closest('button') || e.target.closest('input')) return;
+
+    isDragging = true;
+    hasMoved = false;
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+  });
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (isDragging) {
+    hasMoved = true;
+    ipcRenderer.send('window-drag', { mouseX: dragStartX, mouseY: dragStartY });
+  }
+});
+
+window.addEventListener('mouseup', (e) => {
+  isDragging = false;
+});
+
+// ── 우클릭 종료 패널 (캐릭터 우클릭 시) ──
+robotFace.addEventListener('contextmenu', (e) => {
+  e.preventDefault();
+  const confirmClose = confirm("LookTalk AI를 종료할까요?");
+  if (confirmClose) {
+    ipcRenderer.send('close-app');
+  }
+});
+
+// ── UI 토글 시 크기 업데이트 호출 ──
+robotFace.addEventListener('click', () => {
+  if (!hasMoved) {
+    settingsPanel.classList.toggle('hidden');
+    historyDrawer.classList.add('hidden');
+    updateSettingsUI();
+    updateWindowSize(); // 크기 조절
+  }
+});
+
+// ── 대화 기록(히스토리) 패널 열기 ──
+toggleHistoryButton.addEventListener('click', () => {
+  const isHidden = historyDrawer.classList.toggle('hidden');
+  settingsPanel.classList.add('hidden'); // 설정창은 닫음
+
+  if (!isHidden) history.render();
+  updateWindowSize(); // 크기 조절
+});
+
+document.getElementById('clear-history-button').addEventListener('click', () => {
+  history.clear();
+});
+
+// ── 입력 모드 및 버튼 텍스트 복구 ──
 function setInputMode(show) {
   const inputRow = document.getElementById('input-row');
   const toggleBtn = document.getElementById('toggle-input-button');
 
   if (show) {
     if (speech.isRecording) {
-      isAborted = true; // 중단 플래그 활성화
+      isAborted = true;
       speech.stop();
     }
     inputRow.classList.remove('hidden');
@@ -30,6 +97,8 @@ function setInputMode(show) {
   } else {
     inputRow.classList.add('hidden');
     toggleBtn.innerText = '입력';
+    toggleBtn.style.backgroundColor = ''; // 빨간색 해제
+    document.getElementById('text-input').blur();
   }
 }
 
@@ -38,17 +107,30 @@ const speech = new SpeechHandler(
   (base64, mime) => {
     if (isAborted) {
       isAborted = false;
-      return; // 중단 시 전송 방지
+      return;
     }
     requestAi({ type: 'audio', data: base64, mimeType: mime });
   },
   (isRecording) => {
-    document.getElementById('widget').classList.toggle('recording', isRecording);
+    widget.classList.toggle('recording', isRecording);
+    const toggleBtn = document.getElementById('toggle-input-button');
+
     if (isRecording) {
       ui.setRobotState('listening');
-      document.getElementById('toggle-input-button').innerText = '중단';
+      toggleBtn.innerText = '중단';
+      toggleBtn.style.backgroundColor = '#f87171';
+      statusText.innerText = '🎙️ 듣는 중...';
+      statusText.style.color = '#4ade80';
     } else {
-      if (!isGeneratingResponse) ui.setRobotState('idle');
+      if (!isGeneratingResponse) {
+        ui.setRobotState('idle');
+        statusText.innerText = '준비 완료';
+        statusText.style.color = '#60a5fa';
+      }
+      // 6. 녹음이 끝나면 현재 텍스트창 상태에 맞춰 버튼 텍스트 강제 복구
+      const isInputHidden = document.getElementById('input-row').classList.contains('hidden');
+      toggleBtn.innerText = isInputHidden ? '입력' : '닫기';
+      toggleBtn.style.backgroundColor = '';
     }
   },
   (rms) => ui.handleVolumeEffect(rms, speech.isRecording)
@@ -59,6 +141,8 @@ async function requestAi(payload) {
   if (isGeneratingResponse) return;
   isGeneratingResponse = true;
   ui.setRobotState('thinking');
+  statusText.innerText = 'AI 생각 중...';
+  statusText.style.color = '#facc15';
 
   if (payload.type === 'text') history.addMessage('user', payload.data, appSettings.historyPersistenceEnabled);
 
@@ -77,32 +161,14 @@ async function requestAi(payload) {
     ui.setRobotState('error');
   } finally {
     isGeneratingResponse = false;
+    if (!speech.isRecording) {
+      statusText.innerText = '준비 완료';
+      statusText.style.color = '#60a5fa';
+    }
   }
 }
 
-// ── 메인 루프 및 초기화 ──
-const tracker = new FaceTracker(video);
-async function startApp() {
-  await tracker.init();
-  const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-  video.srcObject = stream;
-  video.onloadedmetadata = () => {
-    video.play();
-    history.load(appSettings.historyPersistenceEnabled);
-    theme.applyPalette(localStorage.getItem('looktalk.palette') || 'mint');
-    loop();
-  };
-}
-
-function loop() {
-  const result = tracker.checkGaze();
-  if (result && result.handRaised && !speech.isRecording && !isGeneratingResponse) {
-    setInputMode(false);
-    speech.start(); // 손 들기 감지 시 마이크 시작
-  }
-  requestAnimationFrame(loop);
-}
-
+// ── 버튼 이벤트 리스너 연결 ──
 document.getElementById('toggle-input-button').addEventListener('click', () => {
   if (speech.isRecording) {
     isAborted = true;
@@ -111,5 +177,128 @@ document.getElementById('toggle-input-button').addEventListener('click', () => {
   }
   setInputMode(document.getElementById('input-row').classList.contains('hidden'));
 });
+
+document.getElementById('send-button').addEventListener('click', () => {
+  const textInput = document.getElementById('text-input');
+  const text = textInput.value.trim();
+  if (text) {
+    requestAi({ type: 'text', data: text });
+    textInput.value = '';
+  }
+});
+
+document.getElementById('text-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    document.getElementById('send-button').click();
+  }
+});
+
+// 현재 선택된 설정 시각화 업데이트
+function updateSettingsUI() {
+  // 기존 선택 해제
+  document.querySelectorAll('.selected').forEach(el => el.classList.remove('selected'));
+
+  const curPalette = localStorage.getItem('looktalk.palette') || 'mint';
+  const curPersonality = localStorage.getItem('looktalk.personality') || 'calm';
+
+  document.querySelector(`.palette-option[data-palette="${curPalette}"]`)?.classList.add('selected');
+  document.querySelector(`.personality-option[data-personality="${curPersonality}"]`)?.classList.add('selected');
+
+  Object.keys(appSettings).forEach(key => {
+    document.querySelector(`.setting-pill[data-setting-key="${key}"][data-setting-value="${appSettings[key]}"]`)?.classList.add('selected');
+  });
+}
+
+// ── 창 크기 자동 조절 최적화 ──
+function updateWindowSize() {
+  const isSettingsOpen = !settingsPanel.classList.contains('hidden');
+  const isHistoryOpen = !historyDrawer.classList.contains('hidden');
+
+  if (isSettingsOpen) {
+    ipcRenderer.send('resize-window', { width: 400, height: 560 });
+  } else if (isHistoryOpen) {
+    // 히스토리가 열려있으면 현재 위젯 높이에 따라 유동적으로 (기존 로직 활용)
+    const newHeight = Math.max(350, widget.offsetHeight + 100);
+    ipcRenderer.send('resize-window', { width: 240, height: newHeight });
+  } else {
+    ipcRenderer.send('resize-window', { width: 240, height: 350 });
+  }
+}
+
+// ── 설정 변경 이벤트 연결 ──
+function setupSettings() {
+  document.querySelectorAll('.palette-option').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      theme.applyPalette(e.target.dataset.palette);
+      updateSettingsUI();
+    });
+  });
+
+  document.querySelectorAll('.personality-option').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      localStorage.setItem('looktalk.personality', e.target.dataset.personality);
+      updateSettingsUI();
+    });
+  });
+
+  // 누락되었던 세부 설정(시간, 음성, 기록) 클릭 이벤트 연동
+  document.querySelectorAll('.setting-pill').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      const key = e.target.dataset.settingKey;
+      let value = e.target.dataset.settingValue;
+
+      // 문자열을 데이터 타입에 맞게 변환
+      if (value === 'true') value = true;
+      else if (value === 'false') value = false;
+      else if (!isNaN(value)) value = Number(value);
+
+      theme.saveSettings({ [key]: value });
+      appSettings = theme.loadSettings(); // 동기화
+      updateSettingsUI();
+    });
+  });
+}
+
+// ── 메인 루프 및 초기화 ──
+const tracker = new FaceTracker(video);
+async function startApp() {
+  try {
+    await tracker.init();
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+      video.play();
+      history.load(appSettings.historyPersistenceEnabled);
+      theme.applyPalette(localStorage.getItem('looktalk.palette') || 'mint');
+      setupSettings();
+
+      isAppReady = true;
+      statusText.innerText = '준비 완료';
+      statusText.style.color = '#60a5fa';
+      ui.setRobotState('idle');
+
+      loop();
+    };
+  } catch (err) {
+    statusText.innerText = '카메라 에러';
+    statusText.style.color = '#f87171';
+  }
+}
+
+function loop() {
+  if (!isAppReady) {
+    requestAnimationFrame(loop);
+    return;
+  }
+  const result = tracker.checkGaze();
+  if (appSettings.voiceTriggerEnabled && result && result.handRaised) {
+    if (!speech.isRecording && !isGeneratingResponse) {
+      setInputMode(false);
+      speech.start();
+    }
+  }
+  requestAnimationFrame(loop);
+}
 
 startApp();
