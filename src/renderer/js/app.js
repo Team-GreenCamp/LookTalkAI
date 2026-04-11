@@ -3,7 +3,8 @@ import { UIController } from './uiController.js';
 import { HistoryManager } from './historyManager.js';
 import { FaceTracker } from './faceTracker.js';
 import { SpeechHandler } from './speechHandler.js';
-const { ipcRenderer } = require('electron');
+import { ROBOT_STATE } from './constants.js'; // 상수 임포트 추가
+import { AiClient } from './aiClient.js';
 
 const ui = new UIController();
 const theme = new ThemeManager();
@@ -41,7 +42,7 @@ document.querySelectorAll('.drag-handle').forEach(handle => {
 window.addEventListener('mousemove', (e) => {
   if (isDragging) {
     hasMoved = true;
-    ipcRenderer.send('window-drag', { mouseX: dragStartX, mouseY: dragStartY });
+    window.lookTalkAPI.dragWindow({ mouseX: dragStartX, mouseY: dragStartY });
   }
 });
 
@@ -54,7 +55,7 @@ robotFace.addEventListener('contextmenu', (e) => {
   e.preventDefault();
   const confirmClose = confirm("LookTalk AI를 종료할까요?");
   if (confirmClose) {
-    ipcRenderer.send('close-app');
+    window.lookTalkAPI.closeApp();
   }
 });
 
@@ -116,14 +117,14 @@ const speech = new SpeechHandler(
     const toggleBtn = document.getElementById('toggle-input-button');
 
     if (isRecording) {
-      ui.setRobotState('listening');
+      ui.setRobotState(ROBOT_STATE.LISTENING);
       toggleBtn.innerText = '중단';
       toggleBtn.style.backgroundColor = '#f87171';
       statusText.innerText = '🎙️ 듣는 중...';
       statusText.style.color = '#4ade80';
     } else {
       if (!isGeneratingResponse) {
-        ui.setRobotState('idle');
+        ui.setRobotState(ROBOT_STATE.IDLE);
         statusText.innerText = '준비 완료';
         statusText.style.color = '#60a5fa';
       }
@@ -140,31 +141,36 @@ const speech = new SpeechHandler(
 async function requestAi(payload) {
   if (isGeneratingResponse) return;
   isGeneratingResponse = true;
-  ui.setRobotState('thinking');
+
+  ui.setRobotState(ROBOT_STATE.THINKING);
   statusText.innerText = 'AI 생각 중...';
   statusText.style.color = '#facc15';
 
   if (payload.type === 'text') history.addMessage('user', payload.data, appSettings.historyPersistenceEnabled);
 
-  try {
-    const response = await ipcRenderer.invoke('process-ai-request', {
-      ...payload,
-      personality: localStorage.getItem('looktalk.personality') || 'calm'
-    });
+  // 💡 aiClient.js 에게 통신을 위임합니다.
+  const personality = localStorage.getItem('looktalk.personality') || 'calm';
+  const response = await AiClient.request(payload, personality);
 
-    if (response.ok) {
-      ui.setRobotState('happy');
-      ui.showBubble(response.reply, appSettings.bubbleDurationMs);
-      history.addMessage('assistant', response.reply, appSettings.historyPersistenceEnabled);
-    }
-  } catch (e) {
-    ui.setRobotState('error');
-  } finally {
-    isGeneratingResponse = false;
-    if (!speech.isRecording) {
-      statusText.innerText = '준비 완료';
-      statusText.style.color = '#60a5fa';
-    }
+  if (response.ok) {
+    ui.setRobotState(ROBOT_STATE.HAPPY);
+    ui.showBubble(response.reply, appSettings.bubbleDurationMs);
+    history.addMessage('assistant', response.reply, appSettings.historyPersistenceEnabled);
+  } else {
+    console.error("AI Response Error:", response.error);
+    ui.setRobotState(ROBOT_STATE.ERROR);
+    statusText.innerText = '응답 오류 발생';
+    statusText.style.color = '#f87171';
+  }
+
+  isGeneratingResponse = false;
+  if (!speech.isRecording) {
+    setTimeout(() => {
+      if (widget.getAttribute('data-state') !== ROBOT_STATE.HAPPY) {
+        statusText.innerText = '준비 완료';
+        statusText.style.color = '#60a5fa';
+      }
+    }, 3000);
   }
 }
 
@@ -215,15 +221,17 @@ function updateWindowSize() {
   const isSettingsOpen = !settingsPanel.classList.contains('hidden');
   const isHistoryOpen = !historyDrawer.classList.contains('hidden');
 
+  let targetWidth = 240;
+  let targetHeight = 350;
+
   if (isSettingsOpen) {
-    ipcRenderer.send('resize-window', { width: 400, height: 560 });
+    targetWidth = 400;
+    targetHeight = 560;
   } else if (isHistoryOpen) {
-    // 히스토리가 열려있으면 현재 위젯 높이에 따라 유동적으로 (기존 로직 활용)
-    const newHeight = Math.max(350, widget.offsetHeight + 100);
-    ipcRenderer.send('resize-window', { width: 240, height: newHeight });
-  } else {
-    ipcRenderer.send('resize-window', { width: 240, height: 350 });
+    targetHeight = Math.max(350, widget.offsetHeight + 240);
   }
+
+  window.lookTalkAPI.resizeWindow({ width: targetWidth, height: targetHeight });
 }
 
 // ── 설정 변경 이벤트 연결 ──
@@ -276,7 +284,7 @@ async function startApp() {
       isAppReady = true;
       statusText.innerText = '준비 완료';
       statusText.style.color = '#60a5fa';
-      ui.setRobotState('idle');
+      ui.setRobotState(ROBOT_STATE.IDLE); // 초기 상태 설정
 
       loop();
     };

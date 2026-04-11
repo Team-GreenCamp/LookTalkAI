@@ -43,9 +43,6 @@ export class UIController {
         }
     }
 
-
-
-
     setReadiness(isReady) {
         this.widget.setAttribute('data-ready', isReady ? 'ready' : 'not-ready');
     }
@@ -68,6 +65,7 @@ export class UIController {
 
         this.speechBubble.innerHTML = '<span class="typing-cursor"></span>';
         this.speechBubble.style.display = 'block';
+        this.speechBubble.scrollTop = 0;
         requestAnimationFrame(() => this.speechBubble.classList.add('visible'));
 
         let charIndex = 0;
@@ -78,6 +76,7 @@ export class UIController {
                 const cursor = this.speechBubble.querySelector('.typing-cursor');
                 if (cursor) cursor.insertAdjacentText('beforebegin', chars[charIndex]);
                 charIndex++;
+
                 this.typingTimerId = setTimeout(typeNext, 35 + Math.random() * 25);
             } else {
                 const cursor = this.speechBubble.querySelector('.typing-cursor');
