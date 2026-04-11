@@ -1,70 +1,62 @@
-// ... 상단부 동일
+// ... 상단 import 부분 동일
+const toggleInputButton = document.getElementById('toggle-input-button');
+const historyPanel = document.getElementById('history-panel'); // 8. 설정/히스토리 패널용
+const settingsButton = document.getElementById('settings-button'); // 8. 설정 버튼
 
-let isAborted = false; // 중단 여부를 체크하는 플래그 추가
+// 2. 드래그 이동 로직 추가
+let isDragging = false;
+let mouseX, mouseY;
 
-// 1. 입력 모드 및 텍스트 제출 로직
+widget.addEventListener('mousedown', (e) => {
+  if (e.target.closest('button') || e.target.closest('input')) return;
+  isDragging = true;
+  mouseX = e.clientX;
+  mouseY = e.clientY;
+});
+
+window.addEventListener('mousemove', (e) => {
+  if (isDragging) {
+    ipcRenderer.send('window-drag', { mouseX, mouseY });
+  }
+});
+
+window.addEventListener('mouseup', () => { isDragging = false; });
+
+// 3, 8. 히스토리 및 설정 버튼 활성화
+settingsButton.addEventListener('click', () => {
+  const isHidden = historyPanel.classList.toggle('hidden');
+  if (!isHidden) history.render(); // 3. 패널 열릴 때 히스토리 렌더링
+});
+
+// 6. 중단 버튼 클릭 시 상태 복구 로직 강화
 function setInputMode(show) {
+  const inputRow = document.getElementById('input-row');
   if (show) {
     if (speech.isRecording) {
-      isAborted = true; // 중단 플래그 활성화
+      isAborted = true;
       speech.stop();
     }
     inputRow.classList.remove('hidden');
     toggleInputButton.innerText = '닫기';
-    setTimeout(() => textInput.focus(), 10);
   } else {
     inputRow.classList.add('hidden');
-    if (!speech.isRecording) {
-      toggleInputButton.innerText = '입력';
-    }
-    textInput.value = '';
-    textInput.blur();
+    toggleInputButton.innerText = '입력';
+    toggleInputButton.style.backgroundColor = ''; // 색상 초기화
   }
 }
 
-// 2. 음성 핸들러 설정 (중단 플래그 로직 반영)
-const speech = new SpeechHandler(
-  (base64Data, mimeType) => {
-    // ✅ 중단 버튼을 눌러서 멈춘 경우라면 AI에게 요청하지 않음
-    if (isAborted) {
-      console.log('[App] 음성 인식 취소됨: 대기 상태로 전환합니다.');
-      isAborted = false; // 플래그 초기화
-      return;
-    }
-    requestAi({ type: 'audio', data: base64Data, mimeType });
-  },
-  (isRecording) => {
-    widget.classList.toggle('recording', isRecording);
-    if (isRecording) {
-      statusText.innerText = '🎙️ 듣는 중...';
-      statusText.style.color = '#4ade80';
-      toggleInputButton.innerText = '중단';
-      toggleInputButton.style.backgroundColor = '#f87171';
-    } else {
-      if (!isGeneratingResponse) {
-        statusText.innerText = '준비 완료';
-        statusText.style.color = '#60a5fa';
-      }
-      const isTextInputActive = !inputRow.classList.contains('hidden');
-      toggleInputButton.innerText = isTextInputActive ? '닫기' : '입력';
-      toggleInputButton.style.backgroundColor = '';
-    }
-  }
-);
-
-// 3. 버튼 클릭 이벤트 (중단 시 플래그 설정)
-function toggleTextInput() {
-  const isTextInputActive = !inputRow.classList.contains('hidden');
-
-  if (speech.isRecording) {
-    isAborted = true; // ✅ 사용자가 직접 '중단'을 누르면 전송을 막음
-    speech.stop();
-    return;
-  }
-
-  setInputMode(!isTextInputActive);
+// 7. 로딩 메시지 제어
+async function startApp() {
+  try {
+    await tracker.init();
+    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+    video.srcObject = stream;
+    video.onloadedmetadata = () => {
+      video.play();
+      isAppReady = true;
+      statusText.innerText = "준비 완료"; // 7. 로딩 문구 제거
+      ui.setReadiness(true); // 7. 준비 상태 업데이트
+      loop();
+    };
+  } catch (err) { /* 에러 처리 */ }
 }
-
-toggleInputButton.addEventListener('click', toggleTextInput);
-
-// ... 하단 loop 및 startApp 로직 동일

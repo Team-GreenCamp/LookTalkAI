@@ -1,450 +1,115 @@
 const { app, BrowserWindow, ipcMain, screen } = require('electron');
 const path = require('path');
-const crypto = require('crypto');
+const fs = require('fs');
 
-let win; // 창 객체를 전역 변수로 선언
-let cursorPollTimerId = null;
-let googleAccessTokenCache = null;
-let googleAccessTokenExpiresAt = 0;
-let googleQuotaProjectId = null;
-let isHistoryDrawerOpen = false;
-let isSettingsPanelOpen = false;
-const collapsedWindowWidth = 220;
-const expandedSettingsWindowWidth = 460;
-const collapsedWindowHeight = 350;
-const expandedWindowHeight = 540;
-const expandedSettingsWindowHeight = 680;
-
-function loadEnvFile() {
-  const envPath = path.join(__dirname, '.env');
-
-  if (!fs.existsSync(envPath)) {
-    return;
-  }
-
+// 환경 변수 로드
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
   const envLines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/);
-
-  for (const rawLine of envLines) {
-    const line = rawLine.trim();
-
-    // 한글 주석과 빈 줄은 건너뜀
-    if (!line || line.startsWith('#')) {
-      continue;
-    }
-
-    const separatorIndex = line.indexOf('=');
-
-    if (separatorIndex === -1) {
-      continue;
-    }
-
-    const key = line.slice(0, separatorIndex).trim();
-    let value = line.slice(separatorIndex + 1).trim();
-
-    if (!key || process.env[key]) {
-      continue;
-    }
-
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1);
-    }
-
-    process.env[key] = value;
+  for (const line of envLines) {
+    const [key, ...val] = line.split('=');
+    if (key && val) process.env[key.trim()] = val.join('=').trim();
   }
 }
 
-loadEnvFile();
+let win;
+const configPath = path.join(app.getPath('userData'), 'window-bounds.json');
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview';
 
-const geminiModel = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview';
-const googleSpeechLanguageCode = process.env.GOOGLE_SPEECH_LANGUAGE_CODE || 'ko-KR';
-const personalityPrompts = {
-  calm: '차분하고 안정적인 말투로 답해라.',
-  bright: '발랄하고 친근한 말투로 답해라.',
-  tsundere: '조금 시크하지만 밉지 않은 말투로 답해라.',
-  assistant: '정돈된 프로 비서 톤으로 답해라.'
-};
-const responseLengthConfigs = {
-  short: {
-    prompt: '한 문장 또는 아주 짧은 두 문장으로 답해라.',
-    maxTokens: 90
-  },
-  medium: {
-    prompt: '짧은 두세 문장 안에서 자연스럽게 답해라.',
-    maxTokens: 160
-  }
-};
+// 마이크 및 최적화 설정
+app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows', 'true');
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,WindowOcclusionPrediction');
 
-function toBase64Url(value) {
-  return Buffer.from(value)
-    .toString('base64')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_')
-    .replace(/=+$/g, '');
-}
+// Gemini 응답 생성 통합 함수
+async function generateGeminiResponse(contentPayload, personality = 'calm', responseLength = 'short') {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY가 없습니다.');
 
-function getGoogleApplicationDefaultCredentials() {
-  const adcPathFromEnv = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-  const defaultAdcPath = path.join(
-    os.homedir(),
-    '.config',
-    'gcloud',
-    'application_default_credentials.json'
-  );
-  const credentialsPath = adcPathFromEnv || defaultAdcPath;
+  const personalityPrompts = {
+    calm: '차분하고 안정적인 말투로 답해라.',
+    bright: '발랄하고 친근한 말투로 답해라.',
+    tsundere: '조금 시크하지만 밉지 않은 말투로 답해라.',
+    assistant: '정돈된 프로 비서 톤으로 답해라.'
+  };
 
-  if (!fs.existsSync(credentialsPath)) {
-    throw new Error(
-      'Application Default Credentials 파일을 찾지 못했습니다. `gcloud auth application-default login`을 먼저 실행하세요.'
-    );
-  }
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
 
-  const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));
-  googleQuotaProjectId = credentials.quota_project_id || process.env.GOOGLE_CLOUD_QUOTA_PROJECT || null;
-  return credentials;
-}
-
-async function getGoogleAccessToken() {
-  const now = Date.now();
-
-  if (googleAccessTokenCache && now < googleAccessTokenExpiresAt) {
-    return googleAccessTokenCache;
-  }
-
-  const credentials = getGoogleApplicationDefaultCredentials();
-  let tokenResponse;
-
-  if (credentials.type === 'authorized_user') {
-    tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      systemInstruction: {
+        parts: [{ text: `너는 한국어로 답하는 데스크톱 비서다. ${personalityPrompts[personality]} 아주 짧게 한두 문장으로만 답해라.` }]
       },
-      body: new URLSearchParams({
-        client_id: credentials.client_id,
-        client_secret: credentials.client_secret,
-        refresh_token: credentials.refresh_token,
-        grant_type: 'refresh_token'
-      })
-    });
-  } else if (credentials.type === 'service_account') {
-    const issuedAt = Math.floor(now / 1000);
-    const expiresAt = issuedAt + 3600;
-    const header = toBase64Url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
-    const claimSet = toBase64Url(JSON.stringify({
-      iss: credentials.client_email,
-      scope: 'https://www.googleapis.com/auth/cloud-platform',
-      aud: 'https://oauth2.googleapis.com/token',
-      exp: expiresAt,
-      iat: issuedAt
-    }));
-    const unsignedToken = `${header}.${claimSet}`;
-    const signature = crypto
-      .createSign('RSA-SHA256')
-      .update(unsignedToken)
-      .sign(credentials.private_key, 'base64')
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=+$/g, '');
-
-    tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded'
-      },
-      body: new URLSearchParams({
-        grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-        assertion: `${unsignedToken}.${signature}`
-      })
-    });
-  } else {
-    throw new Error(`지원하지 않는 ADC 자격 증명 타입입니다: ${credentials.type}`);
-  }
-
-  if (!tokenResponse.ok) {
-    const errorText = await tokenResponse.text();
-    throw new Error(`Google OAuth 토큰 발급 실패 (${tokenResponse.status}): ${errorText}`);
-  }
-
-  const tokenData = await tokenResponse.json();
-  googleAccessTokenCache = tokenData.access_token;
-  googleAccessTokenExpiresAt = now + Math.max((tokenData.expires_in - 60) * 1000, 0);
-
-  return googleAccessTokenCache;
-}
-
-function extractTranscript(data) {
-  const results = Array.isArray(data?.results) ? data.results : [];
-
-  return results
-    .map((result) => result?.alternatives?.[0]?.transcript || '')
-    .join(' ')
-    .trim();
-}
-
-async function transcribeAudioWithGoogle({ audioBase64, mimeType }) {
-  if (!audioBase64) {
-    throw new Error('전사할 오디오 데이터가 없습니다.');
-  }
-
-  const accessToken = await getGoogleAccessToken();
-  const response = await fetch('https://speech.googleapis.com/v1/speech:recognize', {
-    const fs = require('fs');
-
-    // 마이크 및 최적화 설정 유지
-    app.commandLine.appendSwitch('use-fake-ui-for-media-stream');
-    app.commandLine.appendSwitch('disable-renderer-backgrounding');
-    app.commandLine.appendSwitch('disable-background-timer-throttling');
-    app.commandLine.appendSwitch('disable-backgrounding-occluded-windows', 'true');
-    app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,WindowOcclusionPrediction');
-
-    let win;
-    const configPath = path.join(app.getPath('userData'), 'window-bounds.json');
-
-    const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview'; // 음성 인식을 위해 1.5 버전 권장
-
-    async function generateGeminiResponse(contentPayload) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if(!apiKey) throw new Error('GEMINI_API_KEY가 없습니다.');
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: '너는 짧고 자연스러운 한국어로 답하는 데스크톱 비서다. 한두 문장 이내로 간결하게 답해라.' }]
-        },
-        contents: [{ role: 'user', parts: contentPayload }]
-      })
-    });
-
-    const data = await response.json();
-
-    // 에러 핸들링 강화
-    if(data.error) {
-      console.error('Gemini API Error Details:', data.error);
-  return `API 에러: ${data.error.message}`;
-}
-
-return data.candidates?.[0]?.content?.parts?.[0]?.text || '응답을 생성할 수 없습니다.';
-}
-
-async function generateAiReply(userText, personality = 'calm', responseLength = 'short') {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
-  const personalityPrompt = personalityPrompts[personality] || personalityPrompts.calm;
-  const lengthConfig = responseLengthConfigs[responseLength] || responseLengthConfigs.short;
-
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.');
-  }
-
-  // LLM으로 보내는 실제 입력값을 디버그 콘솔에 기록
-  console.log('[LLM][INPUT]', userText);
-
-  const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [
-            {
-              // 성격과 답변 길이를 함께 프롬프트에 반영한다.
-              text: `너는 짧고 자연스러운 한국어로 답하는 데스크톱 비서다. ${personalityPrompt} ${lengthConfig.prompt}`
-            }
-          ]
-        },
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: userText
-              }
-            ]
-          }
-        ],
-        generationConfig: {
-          temperature: 0.7,
-          maxOutputTokens: lengthConfig.maxTokens
-        }
-      })
-    }
-  );
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Gemini API 호출 실패 (${response.status}): ${errorText}`);
-  }
+      contents: [{ role: 'user', parts: contentPayload }]
+    })
+  });
 
   const data = await response.json();
-  const replyText = extractResponseText(data);
-
-  if (!replyText) {
-    throw new Error('Gemini 응답에서 텍스트를 찾지 못했습니다.');
-  }
-
-  // LLM이 반환한 실제 출력값을 디버그 콘솔에 기록
-  console.log('[LLM][OUTPUT]', replyText);
-
-  return replyText;
+  if (data.error) throw new Error(data.error.message);
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '응답을 생성할 수 없습니다.';
 }
 
-function updateWindowBounds() {
-  if (!win || win.isDestroyed()) {
-    return;
-  }
-
-  const bounds = win.getBounds();
-  const nextWidth = isSettingsPanelOpen ? expandedSettingsWindowWidth : collapsedWindowWidth;
-  const nextHeight = Math.max(
-    collapsedWindowHeight,
-    isHistoryDrawerOpen ? expandedWindowHeight : collapsedWindowHeight,
-    isSettingsPanelOpen ? expandedSettingsWindowHeight : collapsedWindowHeight
-  );
-  const nextX = bounds.x - Math.round((nextWidth - bounds.width) / 2);
-
-  win.setBounds({
-    ...bounds,
-    x: nextX,
-    width: nextWidth,
-    height: nextHeight
-  });
-}
-ipcMain.handle('process-ai-request', async (_event, { type, data, mimeType }) => {
+ipcMain.handle('process-ai-request', async (_event, { type, data, mimeType, personality }) => {
   try {
     let parts = [];
     if (type === 'text') {
       parts.push({ text: data });
     } else if (type === 'audio') {
-      // Gemini 멀티모달 입력: 오디오 데이터를 직접 전달
-      parts.push({
-        inlineData: {
-          mimeType: mimeType || 'audio/webm',
-          data: data // base64 string
-        }
-      });
-      parts.push({ text: "이 음성을 듣고 한국어로 자연스럽게 대답해줘." });
+      parts.push({ inlineData: { mimeType: mimeType || 'audio/webm', data: data } });
+      parts.push({ text: "이 음성을 듣고 적절하게 대답해줘." });
     }
-
-    const reply = await generateGeminiResponse(parts);
+    const reply = await generateGeminiResponse(parts, personality);
     return { ok: true, reply };
   } catch (error) {
-    console.error('Gemini Error:', error);
     return { ok: false, error: error.message };
   }
 });
 
 function createWindow() {
   let savedBounds = {};
-  try {
-    if (fs.existsSync(configPath)) {
-      savedBounds = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-    }
-  } catch (e) {
-    console.error('위치 정보 로드 실패');
+  if (fs.existsSync(configPath)) {
+    try { savedBounds = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch (e) { }
   }
 
   win = new BrowserWindow({
-    width: collapsedWindowWidth,
-    height: collapsedWindowHeight,
-    x: savedBounds.x,  // ⭐️ 불러온 X 좌표
-    y: savedBounds.y,  // ⭐️ 불러온 Y 좌표
-    transparent: true,
-    frame: false,
-    alwaysOnTop: true,
+    width: 220, height: 350,
+    x: savedBounds.x, y: savedBounds.y,
+    transparent: true, frame: false, alwaysOnTop: true,
     skipTaskbar: true,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
-    }
+    webPreferences: { nodeIntegration: true, contextIsolation: false }
   });
 
-  // 가상 데스크톱 이동 시에도 유지 설정
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setAlwaysOnTop(true, 'screen-saver');
-
-
   win.loadFile('src/index.html');
+
+  // 드래그 이동을 위한 로직 추가
+  ipcMain.on('window-drag', (event, { mouseX, mouseY }) => {
+    const { x, y } = screen.getCursorScreenPoint();
+    win.setPosition(x - mouseX, y - mouseY);
+  });
+
 
   // 윈도우 위치 저장 (듀얼 모니터 대응)
   const saveWindowPosition = () => {
     const bounds = win.getBounds();
     fs.writeFileSync(configPath, JSON.stringify(bounds));
   };
-
   win.on('moved', saveWindowPosition);
-  win.on('close', () => {
-    saveWindowPosition();
-    if (cursorPollTimerId) {
-      clearInterval(cursorPollTimerId);
-      cursorPollTimerId = null;
+  win.on('close', saveWindowPosition);
+
+  setInterval(() => {
+    if (win && !win.isDestroyed()) {
+      const cursor = screen.getCursorScreenPoint();
+      const bounds = win.getBounds();
+      win.webContents.send('cursor-position', { x: cursor.x - bounds.x, y: cursor.y - bounds.y });
     }
-  });
-
-  // 5. 전역 커서 위치를 30fps로 폴링해서 렌더러에 전달 (투명 창 밖에서도 눈 추적 가능)
-  cursorPollTimerId = setInterval(() => {
-    if (win.isDestroyed()) {
-      clearInterval(cursorPollTimerId);
-      return;
-    }
-
-    const cursor = screen.getCursorScreenPoint();
-    const bounds = win.getBounds();
-
-    // 스크린 좌표를 창 로컬 좌표로 변환
-    win.webContents.send('cursor-position', {
-      x: cursor.x - bounds.x,
-      y: cursor.y - bounds.y
-    });
-  }, 33); // ~30fps
+  }, 33);
 }
-
-ipcMain.on('set-history-drawer-open', (_event, isOpen) => {
-  isHistoryDrawerOpen = isOpen;
-  updateWindowBounds();
-});
-
-ipcMain.on('set-settings-panel-open', (_event, isOpen) => {
-  isSettingsPanelOpen = isOpen;
-  updateWindowBounds();
-});
-
-ipcMain.handle('generate-ai-response', async (_event, payload) => {
-  // 한글 입력이 비어 있으면 불필요한 호출을 막음
-  const normalizedText = typeof payload?.userText === 'string' ? payload.userText.trim() : '';
-  const personality = typeof payload?.personality === 'string' ? payload.personality : 'calm';
-  const responseLength = typeof payload?.responseLength === 'string' ? payload.responseLength : 'short';
-
-  if (!normalizedText) {
-    return { ok: false, error: '전송할 음성 텍스트가 없습니다.' };
-  }
-
-  try {
-    const reply = await generateAiReply(normalizedText, personality, responseLength);
-    return { ok: true, reply };
-  } catch (error) {
-    console.error('❌ AI 응답 생성 실패:', error);
-    return { ok: false, error: error.message || 'AI 응답 생성에 실패했습니다.' };
-  }
-});
-
-ipcMain.handle('transcribe-audio', async (_event, payload) => {
-  try {
-    const transcript = await transcribeAudioWithGoogle(payload || {});
-    return { ok: true, transcript };
-  } catch (error) {
-    console.error('❌ Google STT 전사 실패:', error);
-    return { ok: false, error: error.message || 'Google STT 전사에 실패했습니다.' };
-  }
-});
 
 // 윈도우에서 가상 데스크톱 이동 시 창이 사라지는 현상 방지
 app.commandLine.appendSwitch('disable-features', 'WindowOcclusionPrediction');
