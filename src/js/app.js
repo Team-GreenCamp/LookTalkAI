@@ -1,7 +1,7 @@
 import { FaceTracker } from './faceTracker.js';
 import { SpeechHandler } from './speechHandler.js';
 
-const { ipcRenderer } = require('electron');
+const { ipcRenderer, desktopCapturer, screen: electronScreen } = require('electron');
 
 // ── DOM 요소 캐싱 ──
 const widget = document.getElementById('widget');
@@ -10,6 +10,7 @@ const speechBubble = document.getElementById('speech-bubble');
 const video = document.getElementById('webcam');
 const inputRow = document.getElementById('input-row');
 const textInput = document.getElementById('text-input');
+const screenContextButton = document.getElementById('screen-context-button');
 const sendButton = document.getElementById('send-button');
 const sendIcon = document.getElementById('send-icon');
 const sendSpinner = document.getElementById('send-spinner');
@@ -43,6 +44,7 @@ let cameraStream = null;
 let hasStartedLoop = false;
 let handRaisedSince = 0;
 let speechTriggerCooldownUntil = 0;
+let isScreenContextArmed = false;
 
 const historyStorageKey = 'looktalk.history';
 const settingsStorageKey = 'looktalk.settings';
@@ -242,6 +244,42 @@ async function startCameraStream() {
   video.srcObject = cameraStream;
   await video.play();
   console.log('🎥 카메라 재생 시작');
+}
+
+async function captureCurrentScreenContext() {
+  if (!isScreenContextArmed) {
+    return null;
+  }
+
+  try {
+    const cursorPoint = electronScreen.getCursorScreenPoint();
+    const activeDisplay = electronScreen.getDisplayNearestPoint(cursorPoint);
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: {
+        width: 1280,
+        height: 720
+      }
+    });
+    const source = sources.find((item) => item.display_id === String(activeDisplay.id)) || sources[0];
+
+    if (!source || source.thumbnail.isEmpty()) {
+      return null;
+    }
+
+    // 현재 화면을 질문과 함께 멀티모달 입력으로 보낸다.
+    return {
+      mimeType: 'image/png',
+      imageBase64: source.thumbnail.toPNG().toString('base64')
+    };
+  } catch (error) {
+    console.warn('⚠️ 화면 캡처 실패, 텍스트 질문만 전송합니다:', error);
+    return null;
+  }
+}
+
+function updateScreenContextButtonState() {
+  screenContextButton.classList.toggle('active', isScreenContextArmed);
 }
 
 function stopCameraStream() {
@@ -489,7 +527,8 @@ async function requestAiResponse(userText) {
     const response = await ipcRenderer.invoke('generate-ai-response', {
       userText: trimmedText,
       personality: currentPersonality,
-      responseLength: appSettings.responseLength
+      responseLength: appSettings.responseLength,
+      screenContext: await captureCurrentScreenContext()
     });
 
     if (!response?.ok) {
@@ -528,6 +567,8 @@ async function requestAiResponse(userText) {
       }
     }, 3000);
   } finally {
+    isScreenContextArmed = false;
+    updateScreenContextButtonState();
     setGeneratingState(false);
   }
 }
@@ -574,6 +615,11 @@ toggleHistoryButton.addEventListener('click', () => {
 
 toggleInputButton.addEventListener('click', () => {
   toggleTextInput();
+});
+
+screenContextButton.addEventListener('click', () => {
+  isScreenContextArmed = !isScreenContextArmed;
+  updateScreenContextButtonState();
 });
 
 clearHistoryButton.addEventListener('click', () => {

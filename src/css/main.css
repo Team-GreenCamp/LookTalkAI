@@ -913,6 +913,32 @@ body {
     transition: box-shadow 0.2s ease;
 }
 
+.screen-context-button {
+    border: none;
+    border-radius: 12px;
+    width: 34px;
+    height: 34px;
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.62);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    -webkit-app-region: no-drag;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.screen-context-button:hover {
+    background: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.screen-context-button.active {
+    background: rgba(56, 214, 181, 0.16);
+    color: rgba(56, 214, 181, 0.98);
+}
+
 #text-input::placeholder {
     color: rgba(30, 31, 46, 0.4);
 }

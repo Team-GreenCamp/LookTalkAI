@@ -243,7 +243,7 @@ function extractResponseText(data) {
     .trim();
 }
 
-async function generateAiReply(userText, personality = 'calm', responseLength = 'short') {
+async function generateAiReply(userText, personality = 'calm', responseLength = 'short', screenContext = null) {
   const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   const personalityPrompt = personalityPrompts[personality] || personalityPrompts.calm;
   const lengthConfig = responseLengthConfigs[responseLength] || responseLengthConfigs.short;
@@ -254,6 +254,24 @@ async function generateAiReply(userText, personality = 'calm', responseLength = 
 
   // LLM으로 보내는 실제 입력값을 디버그 콘솔에 기록
   console.log('[LLM][INPUT]', userText);
+
+  const userParts = [];
+
+  if (screenContext?.imageBase64 && screenContext?.mimeType) {
+    userParts.push({
+      inline_data: {
+        mime_type: screenContext.mimeType,
+        data: screenContext.imageBase64
+      }
+    });
+    userParts.push({
+      text: `이 이미지는 사용자의 현재 화면이다. 화면에 실제로 보이는 내용만 근거로 질문에 답해라. 질문: ${userText}`
+    });
+  } else {
+    userParts.push({
+      text: userText
+    });
+  }
 
   const response = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`,
@@ -274,11 +292,7 @@ async function generateAiReply(userText, personality = 'calm', responseLength = 
         contents: [
           {
             role: 'user',
-            parts: [
-              {
-                text: userText
-              }
-            ]
+            parts: userParts
           }
         ],
         generationConfig: {
@@ -417,13 +431,14 @@ ipcMain.handle('generate-ai-response', async (_event, payload) => {
   const normalizedText = typeof payload?.userText === 'string' ? payload.userText.trim() : '';
   const personality = typeof payload?.personality === 'string' ? payload.personality : 'calm';
   const responseLength = typeof payload?.responseLength === 'string' ? payload.responseLength : 'short';
+  const screenContext = payload?.screenContext || null;
 
   if (!normalizedText) {
     return { ok: false, error: '전송할 음성 텍스트가 없습니다.' };
   }
 
   try {
-    const reply = await generateAiReply(normalizedText, personality, responseLength);
+    const reply = await generateAiReply(normalizedText, personality, responseLength, screenContext);
     return { ok: true, reply };
   } catch (error) {
     console.error('❌ AI 응답 생성 실패:', error);
