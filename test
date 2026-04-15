@@ -1,8 +1,0 @@
-// app.js 아무 빈 공간(이벤트 리스너 모여있는 곳 추천)에 아래 코드를 추가합니다.
-
-// ── 마우스 눈동자 추적 리스너 ──
-if (window.lookTalkAPI.onMouseMoveExternal) {
-  window.lookTalkAPI.onMouseMoveExternal((coords) => {
-    ui.updateEyeGaze(coords.x, coords.y);
-  });
-}

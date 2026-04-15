@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, screen, desktopCapturer } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { generateGeminiResponse } = require('./geminiService'); // 분리한 모듈 불러오기
@@ -23,20 +23,70 @@ app.commandLine.appendSwitch('disable-background-timer-throttling');
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows', 'true');
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion,WindowOcclusionPrediction');
 
-// AI 요청 IPC 핸들러
-ipcMain.handle('process-ai-request', async (_event, { type, data, mimeType, personality }) => {
+// ── Gemini 멀티모달 통합 핸들러 ──
+ipcMain.handle('process-ai-request', async (_event, payload) => {
   try {
-    let parts = [];
-    if (type === 'text') {
-      parts.push({ text: data });
-    } else if (type === 'audio') {
-      parts.push({ inlineData: { mimeType: mimeType || 'audio/webm', data: data } });
-      parts.push({ text: "이 음성을 듣고 적절하게 대답해줘." });
+    const parts = [];
+
+    // 1. 첨부된 사진이 있으면 추가
+    if (payload.attachedImage) {
+      parts.push({ inlineData: { mimeType: payload.attachedImage.mimeType, data: payload.attachedImage.imageBase64 } });
+      parts.push({ text: "이 이미지는 사용자가 첨부한 사진이야." });
     }
-    const reply = await generateGeminiResponse(parts, personality);
+
+    // 2. 화면 캡처가 켜져있었다면 추가
+    if (payload.screenContext) {
+      parts.push({ inlineData: { mimeType: payload.screenContext.mimeType, data: payload.screenContext.imageBase64 } });
+      parts.push({ text: "이 이미지는 현재 내 컴퓨터 화면이야. 참고해서 대답해줘." });
+    }
+
+    // 3. 음성 질문이 들어왔다면 추가 (STT 없이 오디오 자체를 전달)
+    if (payload.audioBase64) {
+      parts.push({ inlineData: { mimeType: payload.audioMime, data: payload.audioBase64 } });
+      parts.push({ text: "이 음성을 듣고 내 질문에 대답해줘." });
+    }
+
+    // 4. 텍스트 질문이 있다면 추가
+    if (payload.userText && payload.userText.trim() !== '') {
+      parts.push({ text: payload.userText });
+    }
+
+    // 아무것도 안 보냈다면 에러 방지
+    if (parts.length === 0) {
+      return { ok: false, error: '전달된 내용이 없습니다.' };
+    }
+
+    // geminiService.js의 generateGeminiResponse 함수로 통째로 넘김
+    const reply = await generateGeminiResponse(parts, payload.personality);
     return { ok: true, reply };
+
   } catch (error) {
+    console.error('❌ AI 응답 생성 실패:', error);
     return { ok: false, error: error.message };
+  }
+});
+
+// ── 화면 캡처 IPC 핸들러 (보안 통로) ──
+ipcMain.handle('capture-screen', async () => {
+  try {
+    const cursorPoint = screen.getCursorScreenPoint();
+    const activeDisplay = screen.getDisplayNearestPoint(cursorPoint);
+
+    // 메인 프로세스에서 안전하게 화면을 캡처합니다.
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 1280, height: 720 }
+    });
+
+    const source = sources.find((item) => item.display_id === String(activeDisplay.id)) || sources[0];
+
+    if (!source || source.thumbnail.isEmpty()) return null;
+
+    // 이미지를 Base64 문자열로 변환해서 프론트엔드로 보내줍니다.
+    return source.thumbnail.toPNG().toString('base64');
+  } catch (error) {
+    console.error('화면 캡처 에러:', error);
+    return null;
   }
 });
 

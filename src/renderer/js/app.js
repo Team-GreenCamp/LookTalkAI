@@ -17,16 +17,20 @@ const settingsPanel = document.getElementById('settings-panel');
 const historyDrawer = document.getElementById('history-drawer');
 const toggleHistoryButton = document.getElementById('toggle-history-button');
 const widget = document.getElementById('widget');
+const textInput = document.getElementById('text-input');
 
-let isAborted = false;
 let isGeneratingResponse = false;
 let isAppReady = false;
+let isSpeechTriggerLocked = false;
 let appSettings = theme.loadSettings();
 
 // ── 드래그 이동 및 설정 패널 클릭 감지 ──
 let isDragging = false;
 let dragStartX, dragStartY;
 let hasMoved = false;
+
+// ── 화면 캡처 기능 제어용 변수 ──
+let isScreenContextArmed = false; // 화면 인식 모드가 켜져있는지 확인
 
 document.querySelectorAll('.drag-handle').forEach(handle => {
   handle.addEventListener('mousedown', (e) => {
@@ -90,86 +94,123 @@ function setInputMode(show) {
 
   if (show) {
     if (speech.isRecording) {
-      isAborted = true;
       speech.stop();
     }
     inputRow.classList.remove('hidden');
     toggleBtn.innerText = '닫기';
-    setTimeout(() => document.getElementById('text-input').focus(), 10);
+    setTimeout(() => textInput.focus(), 10);
   } else {
     inputRow.classList.add('hidden');
     toggleBtn.innerText = '입력';
     toggleBtn.style.backgroundColor = ''; // 빨간색 해제
-    document.getElementById('text-input').blur();
+    textInput.blur();
   }
 }
 
 // ── 음성 핸들러 설정 ──
 const speech = new SpeechHandler(
-  (base64, mime) => {
-    if (isAborted) {
-      isAborted = false;
-      return;
-    }
-    requestAi({ type: 'audio', data: base64, mimeType: mime });
+  async (audioBase64, mimeType) => {
+    await requestAiResponse('', { base64: audioBase64, mimeType: mimeType });
   },
   (isRecording) => {
-    widget.classList.toggle('recording', isRecording);
-    const toggleBtn = document.getElementById('toggle-input-button');
-
+    // 에러나던 setListeningSessionActive 대신 uiController 활용
     if (isRecording) {
       ui.setRobotState(ROBOT_STATE.LISTENING);
-      toggleBtn.innerText = '중단';
-      toggleBtn.style.backgroundColor = '#f87171';
-      statusText.innerText = '🎙️ 듣는 중...';
+      statusText.innerText = '듣는 중...';
       statusText.style.color = '#4ade80';
     } else {
+      ui.handleVolumeEffect(0, false);
       if (!isGeneratingResponse) {
         ui.setRobotState(ROBOT_STATE.IDLE);
         statusText.innerText = '준비 완료';
         statusText.style.color = '#60a5fa';
       }
-      // 6. 녹음이 끝나면 현재 텍스트창 상태에 맞춰 버튼 텍스트 강제 복구
-      const isInputHidden = document.getElementById('input-row').classList.contains('hidden');
-      toggleBtn.innerText = isInputHidden ? '입력' : '닫기';
-      toggleBtn.style.backgroundColor = '';
     }
   },
-  (rms) => ui.handleVolumeEffect(rms, speech.isRecording)
+  (rms) => {
+    ui.handleVolumeEffect(rms, speech.isRecording);
+  }
 );
 
-// ── AI 요청 함수 ──
-async function requestAi(payload) {
-  if (isGeneratingResponse) return;
+// ── 통합 AI 요청 함수 ──
+// 인자로 audioData를 추가로 받을 수 있게 합니다.
+async function requestAiResponse(userText = '', audioData = null) {
+  const trimmedText = userText.trim();
+
+  // 텍스트, 오디오, 첨부 사진 중 아무것도 없으면 취소
+  if ((!trimmedText && !audioData && !attachedImageData) || isGeneratingResponse) {
+    return;
+  }
+
+  if (trimmedText) history.addMessage('user', trimmedText, appSettings.historyPersistenceEnabled);
+  else history.addMessage('user', '🎤 (음성/사진/화면 질문)', appSettings.historyPersistenceEnabled);
+
+  isSpeechTriggerLocked = true;
   isGeneratingResponse = true;
+
+  // UI 로딩 상태 처리
+  const sendBtn = document.getElementById('send-button');
+  const spinner = document.getElementById('send-spinner');
+  const icon = document.getElementById('send-icon');
+
+  textInput.disabled = true;
+  sendBtn.disabled = true;
+  spinner.classList.remove('hidden');
+  icon.classList.add('hidden');
 
   ui.setRobotState(ROBOT_STATE.THINKING);
   statusText.innerText = 'AI 생각 중...';
   statusText.style.color = '#facc15';
 
-  if (payload.type === 'text') history.addMessage('user', payload.data, appSettings.historyPersistenceEnabled);
+  try {
+    const currentPersonality = localStorage.getItem('looktalk.personality') || 'calm';
+    const payload = {
+      userText: trimmedText,
+      personality: currentPersonality,
+      screenContext: await captureCurrentScreenContext(),
+      attachedImage: attachedImageData,
+      audioBase64: audioData ? audioData.base64 : null,
+      audioMime: audioData ? audioData.mimeType : null
+    };
 
-  // 💡 aiClient.js 에게 통신을 위임합니다.
-  const personality = localStorage.getItem('looktalk.personality') || 'calm';
-  const response = await AiClient.request(payload, personality);
+    // 통로를 통해 전송
+    const response = await AiClient.request(payload);
 
-  if (response.ok) {
-    ui.setRobotState(ROBOT_STATE.HAPPY);
+    if (!response?.ok) throw new Error(response?.error);
+
     ui.showBubble(response.reply, appSettings.bubbleDurationMs);
     history.addMessage('assistant', response.reply, appSettings.historyPersistenceEnabled);
-    // AI가 말을 할 때 TTS로 읽어줍니다.
-    TtsService.speak(response.reply, personality);
-  } else {
-    console.error("AI Response Error:", response.error);
-    ui.setRobotState(ROBOT_STATE.ERROR);
-    statusText.innerText = '응답 오류 발생';
-    statusText.style.color = '#f87171';
-  }
+    ui.setRobotState(ROBOT_STATE.HAPPY);
 
-  isGeneratingResponse = false;
-  if (!speech.isRecording) {
+    // 💡 [TTS 적용] 설정에서 TTS가 켜져 있다면 읽어주기
+    // (appSettings.ttsEnabled 가 없으면 기본값 true로 설정하거나 무조건 읽게 할 수 있습니다)
+    if (appSettings.ttsEnabled !== false) {
+      TtsService.speak(response.reply, currentPersonality);
+    }
+
+  } catch (error) {
+    console.error('❌ AI 요청 실패:', error);
+    ui.showBubble('으앙... 오류가 났어요 😢', 3000);
+    ui.setRobotState(ROBOT_STATE.ERROR);
+  } finally {
+    // 전송 후 데이터 초기화
+    attachedImageData = null;
+    if (attachButton) attachButton.classList.remove('active');
+
+    isScreenContextArmed = false;
+    if (screenButton) screenButton.classList.remove('active');
+
+    isGeneratingResponse = false;
+    isSpeechTriggerLocked = false;
+
+    textInput.disabled = false;
+    sendBtn.disabled = false;
+    spinner.classList.add('hidden');
+    icon.classList.remove('hidden');
+    textInput.focus();
+
     setTimeout(() => {
-      if (widget.getAttribute('data-state') !== ROBOT_STATE.HAPPY) {
+      if (ui.widget.getAttribute('data-state') !== 'happy') {
         statusText.innerText = '준비 완료';
         statusText.style.color = '#60a5fa';
       }
@@ -180,7 +221,6 @@ async function requestAi(payload) {
 // ── 버튼 이벤트 리스너 연결 ──
 document.getElementById('toggle-input-button').addEventListener('click', () => {
   if (speech.isRecording) {
-    isAborted = true;
     speech.stop();
     return;
   }
@@ -188,15 +228,11 @@ document.getElementById('toggle-input-button').addEventListener('click', () => {
 });
 
 document.getElementById('send-button').addEventListener('click', () => {
-  const textInput = document.getElementById('text-input');
-  const text = textInput.value.trim();
-  if (text) {
-    requestAi({ type: 'text', data: text });
-    textInput.value = '';
-  }
+  requestAiResponse(textInput.value);
+  textInput.value = '';
 });
 
-document.getElementById('text-input').addEventListener('keydown', (e) => {
+textInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
     e.preventDefault();
     document.getElementById('send-button').click();
@@ -278,6 +314,61 @@ if (window.lookTalkAPI.onMouseMoveExternal) {
   });
 }
 
+// ── 사진 첨부 로직 ──
+let attachedImageData = null;
+const attachButton = document.getElementById('attach-button');
+const imageInput = document.getElementById('image-input');
+const screenButton = document.getElementById('screen-context-button');
+
+if (attachButton && imageInput) {
+  attachButton.addEventListener('click', () => imageInput.click());
+
+  imageInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      attachedImageData = {
+        mimeType: file.type,
+        imageBase64: event.target.result.split(',')[1]
+      };
+      attachButton.classList.add('active');
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+// ── 화면 캡처 활성화 로직 ──
+if (screenButton) {
+  screenButton.addEventListener('click', () => {
+    isScreenContextArmed = !isScreenContextArmed;
+    // 💡 시각적 피드백: 활성화 여부에 따라 클래스 토글
+    screenButton.classList.toggle('active', isScreenContextArmed);
+  });
+}
+
+// ── 안전한 화면 캡처 함수 ──
+async function captureCurrentScreenContext() {
+  if (!isScreenContextArmed) return null; // 버튼이 안 눌려있으면 캡처 안 함
+
+  try {
+    // 💡 preload.js에 뚫어둔 통로를 통해 메인 프로세스에게 캡처 이미지(Base64)를 부탁합니다.
+    const imageBase64 = await window.lookTalkAPI.captureScreen();
+
+    if (!imageBase64) return null;
+
+    // AI에게 보낼 수 있는 형태로 포맷팅해서 리턴합니다.
+    return {
+      mimeType: 'image/png',
+      imageBase64: imageBase64
+    };
+  } catch (error) {
+    console.warn('⚠️ 화면 캡처 실패, 텍스트 질문만 전송합니다:', error);
+    return null;
+  }
+}
+
 // ── 메인 루프 및 초기화 ──
 const tracker = new FaceTracker(video);
 async function startApp() {
@@ -311,7 +402,7 @@ function loop() {
   }
   const result = tracker.checkGaze();
   if (appSettings.voiceTriggerEnabled && result && result.handRaised) {
-    if (!speech.isRecording && !isGeneratingResponse) {
+    if (!speech.isRecording && !isGeneratingResponse && !isSpeechTriggerLocked) {
       setInputMode(false);
       speech.start();
     }

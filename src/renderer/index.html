@@ -103,6 +103,13 @@
                     <button class="setting-pill" type="button" data-setting-key="historyPersistenceEnabled" data-setting-value="false">끄기</button>
                 </div>
             </div>
+            <div class="settings-section">
+                <p class="settings-title">음성 읽어주기 (TTS)</p>
+                <div class="option-pill-group">
+                    <button class="setting-pill" type="button" data-setting-key="ttsEnabled" data-setting-value="true">켜기</button>
+                    <button class="setting-pill" type="button" data-setting-key="ttsEnabled" data-setting-value="false">끄기</button>
+                </div>
+            </div>
         </section>
 
         <!-- 액션 버튼 -->
@@ -129,17 +136,25 @@
         <!-- 입력 행 -->
         <div id="input-row" class="input-row hidden">
             <input id="text-input" type="text" placeholder="말해볼래?" maxlength="120">
-            <button id="send-button" type="button">
-                <!-- 전송 아이콘 -->
-                <svg id="send-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                    <line x1="22" y1="2" x2="11" y2="13"></line>
-                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                </svg>
-                <!-- 로딩 스피너 (기본 숨김) -->
-                <svg id="send-spinner" class="send-spinner hidden" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round">
-                    <path d="M12 2a10 10 0 0 1 10 10"></path>
-                </svg>
-            </button>
+            <div class="input-tools">
+                <input type="file" id="image-input" hidden accept="image/*">
+                <button id="attach-button" class="tool-btn" type="button" title="사진 첨부">📎</button>
+                <button id="screen-context-button" class="tool-btn" type="button" title="화면 포함하기">🖥️</button>
+                
+                <button id="send-button" type="button">
+                    <!-- 전송 아이콘 -->
+                    <svg id="send-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+                        stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                    <!-- 로딩 스피너 (기본 숨김) -->
+                    <svg id="send-spinner" class="send-spinner hidden" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                        stroke="currentColor" stroke-width="3" stroke-linecap="round">
+                        <path d="M12 2a10 10 0 0 1 10 10"></path>
+                    </svg>
+                </button>
+            </div>
         </div>
 
         <!-- 세션 대화 기록 서랍 -->

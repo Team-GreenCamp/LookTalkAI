@@ -12,7 +12,8 @@ export class ThemeManager {
             bubbleDurationMs: 5000,
             responseLength: 'short',
             voiceTriggerEnabled: true,
-            historyPersistenceEnabled: true
+            historyPersistenceEnabled: true,
+            ttsEnabled: true
         };
         this.appSettings = { ...this.defaultSettings };
     }
