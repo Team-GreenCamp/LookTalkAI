@@ -43,7 +43,6 @@ body {
 /* ── 말풍선 ── */
 .bubble {
     position: fixed;
-    top: auto;
     bottom: calc(100% - 132px);
     left: 50%;
     transform: translateX(-50%) scale(0.92);
@@ -56,7 +55,7 @@ body {
     font-weight: 700;
     max-width: 320px;
     min-width: 150px;
-    max-height: 150px;
+    max-height: calc(100vh - 180px);
     text-align: center;
     word-break: keep-all;
     line-height: 1.5;
@@ -76,6 +75,7 @@ body {
     display: block;
     opacity: 1;
     transform: translateX(-50%) scale(1);
+    pointer-events: auto;
 }
 
 /* 말풍선 꼬리 */
@@ -990,6 +990,7 @@ body {
 /* ── 세션 대화 기록 서랍 ── */
 .history-drawer {
     width: 100%;
+    height: 188px;
     max-height: 188px;
     margin-top: 6px;
     padding: 10px 10px 12px;
@@ -1001,12 +1002,14 @@ body {
     gap: 10px;
     overflow: hidden;
     -webkit-app-region: no-drag;
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.2);
 }
 
 .history-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-shrink: 0;
     color: rgba(255, 255, 255, 0.72);
     font-size: 11px;
     font-weight: 700;
@@ -1030,9 +1033,23 @@ body {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-height: 145px;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
-    padding-right: 2px;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    padding: 0 4px 2px 0;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.history-list::-webkit-scrollbar {
+    width: 4px;
+}
+
+.history-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.18);
+    border-radius: 999px;
 }
 
 .history-item {
@@ -1061,7 +1078,9 @@ body {
     border-radius: 14px;
     font-size: 11px;
     line-height: 1.45;
-    word-break: keep-all;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: anywhere;
 }
 
 .history-item.user .history-message {

@@ -1,7 +1,7 @@
 import { FaceTracker } from './faceTracker.js';
 import { SpeechHandler } from './speechHandler.js';
 
-const { ipcRenderer, desktopCapturer, screen: electronScreen } = require('electron');
+const { ipcRenderer } = require('electron');
 
 // ── DOM 요소 캐싱 ──
 const widget = document.getElementById('widget');
@@ -252,29 +252,17 @@ async function captureCurrentScreenContext() {
   }
 
   try {
-    const cursorPoint = electronScreen.getCursorScreenPoint();
-    const activeDisplay = electronScreen.getDisplayNearestPoint(cursorPoint);
-    const sources = await desktopCapturer.getSources({
-      types: ['screen'],
-      thumbnailSize: {
-        width: 1280,
-        height: 720
-      }
-    });
-    const source = sources.find((item) => item.display_id === String(activeDisplay.id)) || sources[0];
+    const response = await ipcRenderer.invoke('capture-screen-context');
 
-    if (!source || source.thumbnail.isEmpty()) {
-      return null;
+    if (!response?.ok) {
+      throw new Error(response?.error || '화면 캡처에 실패했습니다.');
     }
 
-    // 현재 화면을 질문과 함께 멀티모달 입력으로 보낸다.
-    return {
-      mimeType: 'image/png',
-      imageBase64: source.thumbnail.toPNG().toString('base64')
-    };
+    // 메인 프로세스에서 캡처한 화면을 질문과 함께 멀티모달 입력으로 보낸다.
+    return response.screenContext;
   } catch (error) {
-    console.warn('⚠️ 화면 캡처 실패, 텍스트 질문만 전송합니다:', error);
-    return null;
+    console.warn('⚠️ 화면 캡처 실패:', error);
+    throw error;
   }
 }
 
@@ -416,6 +404,7 @@ function showResponseBubble(text, onTypingComplete) {
         speechBubble.textContent += chars[charIndex];
       }
       charIndex++;
+      speechBubble.scrollTop = speechBubble.scrollHeight;
       typingTimerId = setTimeout(typeNext, 35 + Math.random() * 25);
     } else {
       // 타이핑 완료 → 커서 제거
@@ -552,7 +541,11 @@ async function requestAiResponse(userText) {
     }, 3500);
   } catch (error) {
     console.error('❌ 렌더러 AI 요청 실패:', error);
-    showResponseBubble('으앙... 오류가 났어요 😢', () => {
+    const errorMessage = error?.message?.includes('화면 캡처')
+      ? '화면 캡처에 실패했어요. 권한을 확인해 주세요.'
+      : '으앙... 오류가 났어요 😢';
+
+    showResponseBubble(errorMessage, () => {
       isSpeechTriggerLocked = false;
     });
     setRobotState('error');
@@ -626,6 +619,10 @@ clearHistoryButton.addEventListener('click', () => {
   conversationHistory = [];
   renderConversationHistory();
   saveConversationHistory();
+});
+
+historyList.addEventListener('wheel', (event) => {
+  event.stopPropagation();
 });
 
 // 얼굴을 누르면 설정 패널을 토글한다.

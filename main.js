@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, screen } = require('electron');
+const { app, BrowserWindow, desktopCapturer, ipcMain, screen } = require('electron');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -60,7 +60,9 @@ function loadEnvFile() {
 
 loadEnvFile();
 
-const geminiModel = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview';
+const vertexAiProjectId = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || '';
+const vertexAiLocation = process.env.VERTEX_AI_LOCATION || 'us-central1';
+const geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
 const googleSpeechLanguageCode = process.env.GOOGLE_SPEECH_LANGUAGE_CODE || 'ko-KR';
 const personalityPrompts = {
   calm: '차분하고 안정적인 말투로 답해라.',
@@ -243,14 +245,24 @@ function extractResponseText(data) {
     .trim();
 }
 
+function getVertexAiGenerateContentUrl() {
+  // global 위치는 리전 prefix 없이 공용 endpoint를 사용해야 한다.
+  const endpoint = vertexAiLocation === 'global'
+    ? 'https://aiplatform.googleapis.com'
+    : `https://${vertexAiLocation}-aiplatform.googleapis.com`;
+
+  return `${endpoint}/v1/projects/${vertexAiProjectId}/locations/${vertexAiLocation}/publishers/google/models/${geminiModel}:generateContent`;
+}
+
 async function generateAiReply(userText, personality = 'calm', responseLength = 'short', screenContext = null) {
-  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
   const personalityPrompt = personalityPrompts[personality] || personalityPrompts.calm;
   const lengthConfig = responseLengthConfigs[responseLength] || responseLengthConfigs.short;
 
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY 환경 변수가 설정되지 않았습니다.');
+  if (!vertexAiProjectId) {
+    throw new Error('GOOGLE_CLOUD_PROJECT 환경 변수가 설정되지 않았습니다.');
   }
+
+  const accessToken = await getGoogleAccessToken();
 
   // LLM으로 보내는 실제 입력값을 디버그 콘솔에 기록
   console.log('[LLM][INPUT]', userText);
@@ -259,32 +271,39 @@ async function generateAiReply(userText, personality = 'calm', responseLength = 
 
   if (screenContext?.imageBase64 && screenContext?.mimeType) {
     userParts.push({
-      inline_data: {
-        mime_type: screenContext.mimeType,
+      text: `이 이미지는 사용자의 현재 화면이다. 화면에 실제로 보이는 내용만 근거로 질문에 답해라. 질문: ${userText}`
+    });
+    userParts.push({
+      inlineData: {
+        mimeType: screenContext.mimeType,
         data: screenContext.imageBase64
       }
     });
-    userParts.push({
-      text: `이 이미지는 사용자의 현재 화면이다. 화면에 실제로 보이는 내용만 근거로 질문에 답해라. 질문: ${userText}`
+    console.log('[LLM][SCREEN_CONTEXT]', {
+      mimeType: screenContext.mimeType,
+      imageBase64Length: screenContext.imageBase64.length
     });
   } else {
     userParts.push({
       text: userText
     });
+    console.log('[LLM][SCREEN_CONTEXT]', 'none');
   }
 
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`,
+    getVertexAiGenerateContentUrl(),
     {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        ...(googleQuotaProjectId ? { 'x-goog-user-project': googleQuotaProjectId } : {})
       },
       body: JSON.stringify({
         systemInstruction: {
           parts: [
             {
-              // 성격과 답변 길이를 함께 프롬프트에 반영한다.
+              // Vertex AI 호출에도 성격과 답변 길이 지시를 함께 반영한다.
               text: `너는 짧고 자연스러운 한국어로 답하는 데스크톱 비서다. ${personalityPrompt} ${lengthConfig.prompt}`
             }
           ]
@@ -305,14 +324,14 @@ async function generateAiReply(userText, personality = 'calm', responseLength = 
 
   if (!response.ok) {
     const errorText = await response.text();
-    throw new Error(`Gemini API 호출 실패 (${response.status}): ${errorText}`);
+    throw new Error(`Vertex AI 호출 실패 (${response.status}): ${errorText}`);
   }
 
   const data = await response.json();
   const replyText = extractResponseText(data);
 
   if (!replyText) {
-    throw new Error('Gemini 응답에서 텍스트를 찾지 못했습니다.');
+    throw new Error('Vertex AI 응답에서 텍스트를 찾지 못했습니다.');
   }
 
   // LLM이 반환한 실제 출력값을 디버그 콘솔에 기록
@@ -424,6 +443,46 @@ ipcMain.on('set-history-drawer-open', (_event, isOpen) => {
 ipcMain.on('set-settings-panel-open', (_event, isOpen) => {
   isSettingsPanelOpen = isOpen;
   updateWindowBounds();
+});
+
+ipcMain.handle('capture-screen-context', async () => {
+  try {
+    const cursorPoint = screen.getCursorScreenPoint();
+    const activeDisplay = screen.getDisplayNearestPoint(cursorPoint);
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: {
+        width: 1280,
+        height: 720
+      }
+    });
+    const source = sources.find((item) => item.display_id === String(activeDisplay.id)) || sources[0];
+
+    if (!source || source.thumbnail.isEmpty()) {
+      throw new Error('화면 캡처 이미지를 가져오지 못했습니다. macOS 화면 기록 권한을 확인해 주세요.');
+    }
+
+    const imageBase64 = source.thumbnail.toPNG().toString('base64');
+    console.log('[SCREEN][CAPTURE]', {
+      displayId: source.display_id,
+      imageBase64Length: imageBase64.length
+    });
+
+    // 화면 이미지를 렌더러로 전달해 LLM 멀티모달 입력에 포함한다.
+    return {
+      ok: true,
+      screenContext: {
+        mimeType: 'image/png',
+        imageBase64
+      }
+    };
+  } catch (error) {
+    console.warn('⚠️ 화면 캡처 실패:', error);
+    return {
+      ok: false,
+      error: error.message || '화면 캡처에 실패했습니다.'
+    };
+  }
 });
 
 ipcMain.handle('generate-ai-response', async (_event, payload) => {
