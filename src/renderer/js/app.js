@@ -23,6 +23,7 @@ let isGeneratingResponse = false;
 let isAppReady = false;
 let isSpeechTriggerLocked = false;
 let appSettings = theme.loadSettings();
+let cameraStream = null;
 
 // ── 드래그 이동 및 설정 패널 클릭 감지 ──
 let isDragging = false;
@@ -97,14 +98,14 @@ function setInputMode(show) {
       speech.stop();
     }
     inputRow.classList.remove('hidden');
-    toggleBtn.innerText = '닫기';
     setTimeout(() => textInput.focus(), 10);
   } else {
     inputRow.classList.add('hidden');
-    toggleBtn.innerText = '입력';
-    toggleBtn.style.backgroundColor = ''; // 빨간색 해제
+    // 아이콘을 덮어씌우던 텍스트 변경 로직 제거
+    toggleBtn.style.backgroundColor = ''; // 빨간색 해제 (필요시 유지)
     textInput.blur();
   }
+  updateWindowSize();
 }
 
 // ── 음성 핸들러 설정 ──
@@ -116,12 +117,14 @@ const speech = new SpeechHandler(
     // 에러나던 setListeningSessionActive 대신 uiController 활용
     if (isRecording) {
       ui.setRobotState(ROBOT_STATE.LISTENING);
+      ui.setReadiness(false);
       statusText.innerText = '듣는 중...';
       statusText.style.color = '#4ade80';
     } else {
       ui.handleVolumeEffect(0, false);
       if (!isGeneratingResponse) {
         ui.setRobotState(ROBOT_STATE.IDLE);
+        ui.setReadiness(appSettings.voiceTriggerEnabled);
         statusText.innerText = '준비 완료';
         statusText.style.color = '#60a5fa';
       }
@@ -137,13 +140,13 @@ const speech = new SpeechHandler(
 async function requestAiResponse(userText = '', audioData = null) {
   const trimmedText = userText.trim();
 
-  // 텍스트, 오디오, 첨부 사진 중 아무것도 없으면 취소
+  // 텍스트, 오디오, 첨부 파일 중 아무것도 없으면 취소
   if ((!trimmedText && !audioData && !attachedImageData) || isGeneratingResponse) {
     return;
   }
 
   if (trimmedText) history.addMessage('user', trimmedText, appSettings.historyPersistenceEnabled);
-  else history.addMessage('user', '🎤 (음성/사진/화면 질문)', appSettings.historyPersistenceEnabled);
+  else history.addMessage('user', '🎤 (음성/파일/화면 질문)', appSettings.historyPersistenceEnabled);
 
   isSpeechTriggerLocked = true;
   isGeneratingResponse = true;
@@ -159,6 +162,7 @@ async function requestAiResponse(userText = '', audioData = null) {
   icon.classList.add('hidden');
 
   ui.setRobotState(ROBOT_STATE.THINKING);
+  ui.setReadiness(false);
   statusText.innerText = 'AI 생각 중...';
   statusText.style.color = '#facc15';
 
@@ -180,20 +184,23 @@ async function requestAiResponse(userText = '', audioData = null) {
 
     if (!response?.ok) throw new Error(response?.error);
 
-    ui.showBubble(response.reply, appSettings.bubbleDurationMs);
-    history.addMessage('assistant', response.reply, appSettings.historyPersistenceEnabled);
-    ui.setRobotState(ROBOT_STATE.HAPPY);
-
     // 💡 [TTS 적용] 설정에서 TTS가 켜져 있다면 읽어주기
     // (appSettings.ttsEnabled 가 없으면 기본값 true로 설정하거나 무조건 읽게 할 수 있습니다)
     if (appSettings.ttsEnabled !== false) {
-      TtsService.speak(response.reply, currentPersonality);
+      // 텍스트 타이핑 애니메이션보다 먼저 TTS 생성을 요청해 재생 지연을 줄인다.
+      void TtsService.speak(response.reply, currentPersonality);
     }
+
+    ui.showBubble(response.reply, appSettings.bubbleDurationMs);
+    history.addMessage('assistant', response.reply, appSettings.historyPersistenceEnabled);
+    ui.setRobotState(ROBOT_STATE.HAPPY);
+    ui.setReadiness(false);
 
   } catch (error) {
     console.error('❌ AI 요청 실패:', error);
     ui.showBubble('으앙... 오류가 났어요 😢', 3000);
     ui.setRobotState(ROBOT_STATE.ERROR);
+    ui.setReadiness(false);
   } finally {
     // 전송 후 데이터 초기화
     attachedImageData = null;
@@ -212,9 +219,13 @@ async function requestAiResponse(userText = '', audioData = null) {
     textInput.focus();
 
     setTimeout(() => {
-      if (ui.widget.getAttribute('data-state') !== 'happy') {
+      ui.setReadiness(appSettings.voiceTriggerEnabled);
+      if (appSettings.voiceTriggerEnabled) {
         statusText.innerText = '준비 완료';
         statusText.style.color = '#60a5fa';
+      } else {
+        statusText.innerText = '음성 트리거 꺼짐';
+        statusText.style.color = '#f87171';
       }
     }, 3000);
   }
@@ -261,18 +272,60 @@ function updateSettingsUI() {
 function updateWindowSize() {
   const isSettingsOpen = !settingsPanel.classList.contains('hidden');
   const isHistoryOpen = !historyDrawer.classList.contains('hidden');
+  const isInputOpen = !document.getElementById('input-row').classList.contains('hidden');
 
   let targetWidth = 240;
-  let targetHeight = 350;
+  // 상단 패딩이 135px로 늘어났으므로 계산에 추가 반영 (15px 여유 포함 총 150px)
+  let targetHeight = Math.max(400, widget.offsetHeight + 150);
 
-  if (isSettingsOpen) {
+  if (isHistoryOpen) {
+    targetWidth = 500;
+    targetHeight = Math.max(targetHeight, 470);
+  } else if (isSettingsOpen) {
     targetWidth = 400;
-    targetHeight = 560;
-  } else if (isHistoryOpen) {
-    targetHeight = Math.max(350, widget.offsetHeight + 240);
+    targetHeight = Math.max(targetHeight, 560);
   }
 
   window.lookTalkAPI.resizeWindow({ width: targetWidth, height: targetHeight });
+}
+
+async function startCameraStream() {
+  if (cameraStream) {
+    return;
+  }
+
+  // 음성 트리거가 켜졌을 때만 손 들기 인식을 위해 카메라를 연다.
+  cameraStream = await navigator.mediaDevices.getUserMedia({ video: true });
+  video.srcObject = cameraStream;
+  await video.play();
+}
+
+function stopCameraStream() {
+  if (!cameraStream) {
+    return;
+  }
+
+  cameraStream.getTracks().forEach((track) => track.stop());
+  cameraStream = null;
+  video.pause();
+  video.srcObject = null;
+}
+
+async function applyVoiceTriggerCameraState() {
+  if (appSettings.voiceTriggerEnabled) {
+    await startCameraStream();
+    ui.setReadiness(true);
+    return;
+  }
+
+  if (speech.isRecording) {
+    speech.stop();
+  }
+  stopCameraStream();
+  ui.setRobotState(ROBOT_STATE.IDLE);
+  ui.setReadiness(false);
+  statusText.innerText = '음성 트리거 꺼짐';
+  statusText.style.color = '#f87171';
 }
 
 // ── 설정 변경 이벤트 연결 ──
@@ -293,7 +346,7 @@ function setupSettings() {
 
   // 누락되었던 세부 설정(시간, 음성, 기록) 클릭 이벤트 연동
   document.querySelectorAll('.setting-pill').forEach(btn => {
-    btn.addEventListener('click', (e) => {
+    btn.addEventListener('click', async (e) => {
       const key = e.target.dataset.settingKey;
       let value = e.target.dataset.settingValue;
 
@@ -304,6 +357,9 @@ function setupSettings() {
 
       theme.saveSettings({ [key]: value });
       appSettings = theme.loadSettings(); // 동기화
+      if (key === 'voiceTriggerEnabled') {
+        await applyVoiceTriggerCameraState();
+      }
       updateSettingsUI();
     });
   });
@@ -316,11 +372,21 @@ if (window.lookTalkAPI.onMouseMoveExternal) {
   });
 }
 
-// ── 사진 첨부 로직 ──
+// ── 파일 첨부 로직 ──
 let attachedImageData = null;
 const attachButton = document.getElementById('attach-button');
-const imageInput = document.getElementById('image-input');
+const imageInput = document.getElementById('file-input');
 const screenButton = document.getElementById('screen-context-button');
+const textFileExtensions = new Set(['txt', 'md', 'json', 'csv', 'tsv', 'js', 'ts', 'html', 'css', 'xml', 'log']);
+
+function isTextFile(file) {
+  const extension = file.name.split('.').pop()?.toLowerCase();
+  return file.type.startsWith('text/') || textFileExtensions.has(extension);
+}
+
+function isPdfFile(file) {
+  return file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+}
 
 if (attachButton && imageInput) {
   attachButton.addEventListener('click', () => imageInput.click());
@@ -331,17 +397,45 @@ if (attachButton && imageInput) {
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      attachedImageData = {
-        mimeType: file.type,
-        imageBase64: event.target.result.split(',')[1]
-      };
+      if (file.type.startsWith('image/')) {
+        attachedImageData = {
+          kind: 'image',
+          name: file.name,
+          mimeType: file.type,
+          imageBase64: event.target.result.split(',')[1]
+        };
+      } else if (isPdfFile(file)) {
+        attachedImageData = {
+          kind: 'pdf',
+          name: file.name,
+          mimeType: 'application/pdf',
+          fileBase64: event.target.result.split(',')[1]
+        };
+      } else {
+        attachedImageData = {
+          kind: 'text',
+          name: file.name,
+          mimeType: file.type || 'text/plain',
+          text: String(event.target.result).slice(0, 20000)
+        };
+      }
       attachButton.classList.add('active');
+      imageInput.value = '';
     };
-    reader.readAsDataURL(file);
+
+    if (file.type.startsWith('image/') || isPdfFile(file)) {
+      reader.readAsDataURL(file);
+    } else if (isTextFile(file)) {
+      reader.readAsText(file);
+    } else {
+      attachedImageData = null;
+      imageInput.value = '';
+      attachButton.classList.remove('active');
+      ui.showBubble('아직 이 파일 형식은 읽을 수 없어요. PDF, 이미지, txt, md, json, csv 같은 파일을 첨부해 주세요.', 3500);
+    }
   });
 }
 
-// ── 화면 캡처 활성화 로직 ──
 if (screenButton) {
   screenButton.addEventListener('click', () => {
     isScreenContextArmed = !isScreenContextArmed;
@@ -376,21 +470,22 @@ const tracker = new FaceTracker(video);
 async function startApp() {
   try {
     await tracker.init();
-    const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-    video.srcObject = stream;
-    video.onloadedmetadata = () => {
-      video.play();
-      history.load(appSettings.historyPersistenceEnabled);
-      theme.applyPalette(localStorage.getItem('looktalk.palette') || 'mint');
-      setupSettings();
+    history.load(appSettings.historyPersistenceEnabled);
+    theme.applyPalette(localStorage.getItem('looktalk.palette') || 'mint');
+    setupSettings();
+    await applyVoiceTriggerCameraState();
 
-      isAppReady = true;
+    isAppReady = true;
+    if (appSettings.voiceTriggerEnabled) {
+      ui.setReadiness(true);
       statusText.innerText = '준비 완료';
       statusText.style.color = '#60a5fa';
-      ui.setRobotState(ROBOT_STATE.IDLE); // 초기 상태 설정
+    } else {
+      ui.setReadiness(false);
+    }
+    ui.setRobotState(ROBOT_STATE.IDLE); // 초기 상태 설정
 
-      loop();
-    };
+    loop();
   } catch (err) {
     statusText.innerText = '카메라 에러';
     statusText.style.color = '#f87171';
@@ -399,6 +494,10 @@ async function startApp() {
 
 function loop() {
   if (!isAppReady) {
+    requestAnimationFrame(loop);
+    return;
+  }
+  if (!appSettings.voiceTriggerEnabled) {
     requestAnimationFrame(loop);
     return;
   }

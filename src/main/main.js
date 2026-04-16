@@ -1,7 +1,6 @@
 const { app, BrowserWindow, ipcMain, screen, desktopCapturer } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { generateGeminiResponse } = require('./geminiService'); // 분리한 모듈 불러오기
 
 // 환경 변수 로드
 const envPath = path.join(__dirname, '../../.env'); // 경로 수정 (main.js 위치 기준)
@@ -12,6 +11,8 @@ if (fs.existsSync(envPath)) {
     if (key && val) process.env[key.trim()] = val.join('=').trim();
   }
 }
+
+const { generateGeminiResponse, synthesizeGeminiSpeech } = require('./geminiService'); // .env 로드 후 분리한 모듈 불러오기
 
 let win;
 const configPath = path.join(app.getPath('userData'), 'window-bounds.json');
@@ -28,10 +29,24 @@ ipcMain.handle('process-ai-request', async (_event, payload) => {
   try {
     const parts = [];
 
-    // 1. 첨부된 사진이 있으면 추가
+    // 1. 첨부 파일이 있으면 이미지 또는 텍스트로 추가
     if (payload.attachedImage) {
-      parts.push({ inlineData: { mimeType: payload.attachedImage.mimeType, data: payload.attachedImage.imageBase64 } });
-      parts.push({ text: "이 이미지는 사용자가 첨부한 사진이야." });
+      if (payload.attachedImage.kind === 'text') {
+        parts.push({
+          text: `다음은 사용자가 첨부한 텍스트 파일이다. 파일명: ${payload.attachedImage.name}\n\n${payload.attachedImage.text}`
+        });
+      } else if (payload.attachedImage.kind === 'pdf') {
+        parts.push({
+          inlineData: {
+            mimeType: 'application/pdf',
+            data: payload.attachedImage.fileBase64
+          }
+        });
+        parts.push({ text: `이 PDF는 사용자가 첨부한 파일이다. 파일명: ${payload.attachedImage.name || 'document.pdf'}` });
+      } else {
+        parts.push({ inlineData: { mimeType: payload.attachedImage.mimeType, data: payload.attachedImage.imageBase64 } });
+        parts.push({ text: `이 이미지는 사용자가 첨부한 파일이다. 파일명: ${payload.attachedImage.name || 'image'}` });
+      }
     }
 
     // 2. 화면 캡처가 켜져있었다면 추가
@@ -70,6 +85,16 @@ ipcMain.handle('process-ai-request', async (_event, payload) => {
   } catch (error) {
     console.error('❌ AI 응답 생성 실패:', error);
     return { ok: false, error: error.message };
+  }
+});
+
+ipcMain.handle('synthesize-speech', async (_event, payload) => {
+  try {
+    const result = await synthesizeGeminiSpeech(payload?.text, payload?.personality);
+    return { ok: true, ...result };
+  } catch (error) {
+    console.error('❌ Google Cloud TTS 생성 실패:', error);
+    return { ok: false, error: error.message || 'TTS 생성에 실패했습니다.' };
   }
 });
 
@@ -115,7 +140,7 @@ function createWindow() {
     width: 220, height: 350,
     x: savedBounds.x, y: savedBounds.y,
     transparent: true, frame: false, alwaysOnTop: true,
-    skipTaskbar: true,
+    hasShadow: false, skipTaskbar: true,
     webPreferences: {
       nodeIntegration: false,    // [보안강화] 직접 Node.js 사용 금지
       contextIsolation: true,    // [보안강화] 메인과 렌더러 환경 완전 분리

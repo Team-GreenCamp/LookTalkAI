@@ -1,31 +1,35 @@
 export class TtsService {
-    static speak(text, personality = 'calm') {
-        // 혹시 이전에 읽고 있던 말이 있으면 끊기
-        window.speechSynthesis.cancel();
+    static currentAudio = null;
 
-        const utterance = new SpeechSynthesisUtterance(text);
-        utterance.lang = 'ko-KR';
+    static async speak(text, personality = 'calm') {
+        this.stop();
 
-        // 성격별로 목소리 톤과 속도 조절
-        if (personality === 'bright') {
-            utterance.pitch = 1.4; // 통통 튀는 높은 톤
-            utterance.rate = 1.15; // 살짝 빠른 속도
-        } else if (personality === 'tsundere') {
-            utterance.pitch = 0.8; // 낮고 시크한 톤
-            utterance.rate = 1.0;
-        } else if (personality === 'assistant') {
-            utterance.pitch = 1.0;
-            utterance.rate = 1.1;  // 또박또박 약간 빠르게
-        } else {
-            // calm (기본값)
-            utterance.pitch = 0.9; // 차분하고 낮은 톤
-            utterance.rate = 0.95;
+        try {
+            const response = await window.lookTalkAPI.synthesizeSpeech({
+                text,
+                personality
+            });
+
+            if (!response?.ok) {
+                throw new Error(response?.error || 'TTS 생성에 실패했습니다.');
+            }
+
+            // 메인 프로세스에서 받은 Google Cloud TTS 오디오를 브라우저 Audio로 재생한다.
+            const audio = new Audio(`data:${response.mimeType};base64,${response.audioBase64}`);
+            this.currentAudio = audio;
+            await audio.play();
+        } catch (error) {
+            console.error('❌ TTS 재생 실패:', error);
         }
-
-        window.speechSynthesis.speak(utterance);
     }
 
     static stop() {
-        window.speechSynthesis.cancel();
+        if (!this.currentAudio) {
+            return;
+        }
+
+        this.currentAudio.pause();
+        this.currentAudio.currentTime = 0;
+        this.currentAudio = null;
     }
 }

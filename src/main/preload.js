@@ -13,5 +13,7 @@ contextBridge.exposeInMainWorld('lookTalkAPI', {
     // 5. 외부 마우스 위치 데이터 받는 통로
     onMouseMoveExternal: (callback) => ipcRenderer.on('mouse-move-external', (_event, coords) => callback(coords)),
     // 6. 화면 캡처 요청
-    captureScreen: () => ipcRenderer.invoke('capture-screen')
+    captureScreen: () => ipcRenderer.invoke('capture-screen'),
+    // 7. Google Cloud TTS 요청
+    synthesizeSpeech: (payload) => ipcRenderer.invoke('synthesize-speech', payload)
 });

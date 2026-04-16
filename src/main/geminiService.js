@@ -6,6 +6,11 @@ const crypto = require('crypto');
 const VERTEX_AI_PROJECT_ID = process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT || '';
 const VERTEX_AI_LOCATION = process.env.VERTEX_AI_LOCATION || 'global';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite-preview';
+const GEMINI_TTS_MODEL = process.env.GEMINI_TTS_MODEL || 'gemini-3.1-flash-tts-preview';
+const GEMINI_TTS_LOCATION = process.env.GEMINI_TTS_LOCATION || 'global';
+const GEMINI_TTS_LANGUAGE_CODE = process.env.GEMINI_TTS_LANGUAGE_CODE || 'ko-KR';
+const GEMINI_TTS_VOICE = process.env.GEMINI_TTS_VOICE || 'Kore';
+const GEMINI_TTS_AUDIO_ENCODING = process.env.GEMINI_TTS_AUDIO_ENCODING || 'MP3';
 const responseLengthConfigs = {
     short: {
         prompt: '아주 짧게 한두 문장으로만 답해라.',
@@ -126,6 +131,26 @@ function getVertexAiGenerateContentUrl() {
     return `${endpoint}/v1/projects/${VERTEX_AI_PROJECT_ID}/locations/${VERTEX_AI_LOCATION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
 }
 
+function getTextToSpeechUrl() {
+    // global 위치는 prefix 없이 기본 Text-to-Speech endpoint를 사용한다.
+    const endpoint = GEMINI_TTS_LOCATION === 'global'
+        ? 'https://texttospeech.googleapis.com'
+        : `https://${GEMINI_TTS_LOCATION}-texttospeech.googleapis.com`;
+
+    return `${endpoint}/v1/text:synthesize`;
+}
+
+function buildTtsPrompt(personality = 'calm') {
+    const prompts = {
+        calm: '차분하고 안정적인 한국어 데스크톱 비서 목소리로 말해라.',
+        bright: '밝고 친근하며 살짝 생동감 있는 한국어 목소리로 말해라.',
+        tsundere: '조금 시크하지만 밉지 않은 한국어 목소리로 말해라.',
+        assistant: '또박또박하고 정돈된 전문 비서 톤의 한국어 목소리로 말해라.'
+    };
+
+    return prompts[personality] || prompts.calm;
+}
+
 function buildConversationContents(currentParts, conversationContext = []) {
     const safeContext = Array.isArray(conversationContext) ? conversationContext : [];
     const contents = safeContext
@@ -221,4 +246,57 @@ async function generateGeminiResponse(contentPayload, personality = 'calm', opti
     return replyText;
 }
 
-module.exports = { generateGeminiResponse };
+async function synthesizeGeminiSpeech(text, personality = 'calm') {
+    const normalizedText = typeof text === 'string' ? text.trim() : '';
+
+    if (!normalizedText) {
+        throw new Error('TTS로 변환할 텍스트가 없습니다.');
+    }
+
+    if (!VERTEX_AI_PROJECT_ID) {
+        throw new Error('GOOGLE_CLOUD_PROJECT 환경 변수가 설정되지 않았습니다.');
+    }
+
+    const accessToken = await getGoogleAccessToken();
+    const response = await fetch(getTextToSpeechUrl(), {
+        method: 'POST',
+        headers: {
+            Authorization: `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+            ...(googleQuotaProjectId ? { 'x-goog-user-project': googleQuotaProjectId } : {})
+        },
+        body: JSON.stringify({
+            input: {
+                // Gemini-TTS는 스타일 지시와 읽을 텍스트를 분리해서 전달한다.
+                prompt: buildTtsPrompt(personality),
+                text: normalizedText
+            },
+            voice: {
+                languageCode: GEMINI_TTS_LANGUAGE_CODE,
+                name: GEMINI_TTS_VOICE,
+                model_name: GEMINI_TTS_MODEL
+            },
+            audioConfig: {
+                audioEncoding: GEMINI_TTS_AUDIO_ENCODING
+            }
+        })
+    });
+
+    if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Google Cloud TTS 호출 실패 (${response.status}): ${errorText}`);
+    }
+
+    const data = await response.json();
+
+    if (!data.audioContent) {
+        throw new Error('Google Cloud TTS 응답에서 오디오를 찾지 못했습니다.');
+    }
+
+    return {
+        audioBase64: data.audioContent,
+        mimeType: GEMINI_TTS_AUDIO_ENCODING === 'MP3' ? 'audio/mpeg' : 'audio/wav'
+    };
+}
+
+module.exports = { generateGeminiResponse, synthesizeGeminiSpeech };

@@ -60,6 +60,8 @@ export class HistoryManager {
                 <p class="history-message">${this.escapeHtml(msg.text)}</p>
                 </div>
             `).join('');
-        this.historyList.scrollTop = this.historyList.scrollHeight;
+        setTimeout(() => {
+            this.historyList.scrollTop = this.historyList.scrollHeight;
+        }, 10);
     }
 }

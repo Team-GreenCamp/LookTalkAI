@@ -75,6 +75,7 @@ export class UIController {
             if (charIndex < chars.length) {
                 const cursor = this.speechBubble.querySelector('.typing-cursor');
                 if (cursor) cursor.insertAdjacentText('beforebegin', chars[charIndex]);
+                this.speechBubble.scrollTop = this.speechBubble.scrollHeight; // 💡 자동 스크롤 추가
                 charIndex++;
 
                 this.typingTimerId = setTimeout(typeNext, 35 + Math.random() * 25);
